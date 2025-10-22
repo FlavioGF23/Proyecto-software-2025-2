@@ -10,5 +10,10 @@ Este proyecto implementa un sistema básico de detección de rostros.
 ## ⚙️ Requisitos
 - Python 3.8 o superior  
 - Librerías necesarias:
-  bash
-  pip install opencv-python
+  gradio
+  opencv-python
+  tensorflow
+  pillow
+  matplotlib
+  numpy
+
