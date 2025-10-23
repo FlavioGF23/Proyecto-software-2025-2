@@ -1,185 +1,230 @@
-# ---------------------------------------------------------------------------
-# PASO 1: IMPORTACIÓN de BIBLIOTECAS
-# ---------------------------------------------------------------------------
+import os
 import cv2
 import numpy as np
 import tensorflow as tf
 from PIL import Image
 import warnings
 import gradio as gr
+from PIL.ExifTags import TAGS, GPSTAGS
 
-# Configuración de logs
 warnings.filterwarnings('ignore', category=FutureWarning)
 tf.get_logger().setLevel('ERROR')
 
 # ---------------------------------------------------------------------------
-# PASO 2: INICIALIZACIÓN DE MODELOS
+# CONFIG
+# ---------------------------------------------------------------------------
+MODEL_PATH = "cnn_model.h5"  
+SERVER_PORT = 7860
+USE_PUBLIC_SHARE = False  # cambiar a True solo si entiendes implicaciones de exponer tu app
+
+# ---------------------------------------------------------------------------
+# CARGA DEL MODELO (robusta)
 # ---------------------------------------------------------------------------
 print("Inicializando componentes... Por favor espera.")
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(f"No se encontró el modelo en: {MODEL_PATH}. Coloca el .h5 en el mismo folder o ajusta MODEL_PATH.")
+
 try:
-    # Clasificador para rostro principal
-    haar_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_detector = cv2.CascadeClassifier(haar_cascade_path)
-    if face_detector.empty():
-        raise IOError("No se pudo cargar el clasificador Haar Cascade para rostros.")
-
-    # --- CAMBIO CRÍTICAL 1: CARGAR TU MODELO ENTRENADO ---
-    MODEL_PATH = 'deepfake-detection-models-other-default-v12' 
-    
-    print(f"Cargando modelo desde: {MODEL_PATH}...")
-    classification_model = tf.keras.models.load_model(MODEL_PATH)
-    print("... Componentes listos.")
-
+    # load_model(..., compile=False) evita problemas si faltan objetos de compilación
+    classification_model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+    print(f"Modelo cargado desde {MODEL_PATH}")
+    classification_model.summary()
 except Exception as e:
-    print(f"Error fatal al cargar el modelo desde '{MODEL_PATH}'.")
-    print(f"Asegúrate que la ruta sea correcta y el modelo sea compatible con Keras.")
-    print(f"Error original: {e}")
-    exit()
+    print("Error al cargar el modelo. Verifica que sea un modelo Keras/TensorFlow compatible.")
+    raise
 
 # ---------------------------------------------------------------------------
-# COMPONENTE 1: PROCESAMIENTO DE DATOS (Modificado para eficiencia)
+# HAAR CASCADE (detección de rostros)
 # ---------------------------------------------------------------------------
-def preprocess_face(image_array_rgb, target_size=(299, 299)):
-    """
-    Procesa un array de NumPy (RGB) directamente desde PIL/Gradio.
-    Ya no necesita leer desde un archivo.
-    """
+haar_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+face_detector = cv2.CascadeClassifier(haar_cascade_path)
+if face_detector.empty():
+    raise IOError("No se pudo cargar el Haar Cascade para detección de rostros.")
+
+# ---------------------------------------------------------------------------
+# UTIL: obtener nombre de la última capa conv si no conoces el nombre exacto
+# ---------------------------------------------------------------------------
+def find_last_conv_layer(model):
+    # Busca la última capa con 4D output (batch, h, w, channels)
+    for layer in reversed(model.layers):
+        shape = layer.output_shape if hasattr(layer, "output_shape") else None
+        if shape is None:
+            continue
+        # shape puede ser (None, H, W, C) o similar
+        if len(shape) == 4:
+            return layer.name
+    return None
+# ---------------------------------------------------------------------------
+# LECTURA DE METADATOS
+# ---------------------------------------------------------------------------
+def extract_image_metadata(pil_img):
+    meta_text = "Metadatos encontrados:\n"
     try:
-        # Convertir a BGR para OpenCV (detección de rostros)
-        img_bgr = cv2.cvtColor(image_array_rgb, cv2.COLOR_RGB2BGR)
-        gray_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        
-        faces = face_detector.detectMultiScale(gray_img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-        if len(faces) == 0:
-            return None, None, None # No se encontró rostro
-
-        # Extraer el rostro más grande
-        main_face_coords = max(faces, key=lambda box: box[2] * box[3])
-        x, y, w, h = main_face_coords
-        
-        # Recortar de la imagen RGB original
-        face_cropped_rgb = image_array_rgb[y:y+h, x:x+w]
-        
-        # Redimensionar usando PIL (mejor calidad con antialias)
-        face_image_pil = Image.fromarray(face_cropped_rgb)
-        face_image_pil = face_image_pil.resize(target_size, Image.LANCZOS) # Usar LANCZOS es mejor
-        
-        return np.array(face_image_pil), image_array_rgb, main_face_coords
+        # 1. EXIF tradicional (cámaras)
+        exif_data = pil_img._getexif() if hasattr(pil_img, "_getexif") else None
+        if exif_data:
+            for tag, value in exif_data.items():
+                meta_text += f"{tag}: {value}\n"
+        else:
+            meta_text += "No hay metadatos EXIF.\n"
     except Exception as e:
-        print(f"Error en preprocess_face: {e}")
+        meta_text += f"Error leyendo EXIF: {e}\n"
+
+    # 2. PIL info (XMP, PNGInfo, prompts IA, etc.)
+    if hasattr(pil_img, "info") and pil_img.info:
+        meta_text += "\n Datos adicionales (XMP / PNGInfo / prompts IA):\n"
+        for key, value in pil_img.info.items():
+            meta_text += f"{key}: {value}\n"
+    else:
+        meta_text += "\nNo hay información extra en PIL.info.\n"
+
+    return meta_text.strip()
+# ---------------------------------------------------------------------------
+# PREPROCESS (extrae la cara principal y la redimensiona)
+# ---------------------------------------------------------------------------
+def preprocess_face(image_array_rgb, target_size=(128, 128)):
+    try:
+        # Asegurar tipo y rango
+        image_np = np.asarray(image_array_rgb).astype(np.uint8)
+        img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        if len(faces) == 0:
+            return None, image_np, None
+
+        # elegir la cara más grande
+        x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
+        face_rgb = image_np[y:y+h, x:x+w]
+
+        # resize con PIL para mejor calidad
+        face_pil = Image.fromarray(face_rgb).resize(target_size, Image.LANCZOS)
+        face_arr = np.array(face_pil).astype(np.uint8)
+
+        return face_arr, image_np, (x, y, w, h)
+    except Exception as e:
+        print(f"Error preprocess_face: {e}")
         return None, None, None
 
 # ---------------------------------------------------------------------------
-# COMPONENTE 2: DETECCIÓN DE DEEPFAKES (Lógica corregida)
+# CLASIFICACIÓN
 # ---------------------------------------------------------------------------
 def classify_face(face_image, model):
-    """
-    Clasifica el rostro usando un modelo binario (0=Real, 1=Fake).
-    """
     if face_image is None:
         return None, None
 
-    # Preprocesar para Xception
-    img_array = tf.keras.applications.xception.preprocess_input(face_image.copy())
-    img_array = np.expand_dims(img_array, axis=0) # Crear batch de 1
-    
-    # --- CAMBIO CRÍTICAL 2: LÓGICA DE CLASIFICACIÓN BINARIA ---
-    # Asume que el modelo tiene 1 neurona de salida (con sigmoide)
-    prediction = model.predict(img_array, verbose=0)[0][0]
-    confidence_score = float(prediction)
-    
-    # Usar 0.5 como umbral estándar
-    if confidence_score > 0.5:
+    # Asegurar float32 antes del preprocess_input
+    face = face_image.astype(np.float32)
+    x = (face.copy() / 255.0)
+    x = np.expand_dims(x, axis=0)
+
+    pred = model.predict(x, verbose=0)
+    # Manejar formas (1,), (1,1) o (1,n)
+    pred_val = float(np.squeeze(pred))
+
+    # Interpretación: modelo con salida sigmoide -> prob de "fake"
+    prob_fake = np.clip(pred_val, 0.0, 1.0)
+    threshold = 0.5
+
+    if prob_fake > threshold:
         label = "Potencialmente Falso (Fake)"
-        confidence_percent = confidence_score
+        confidence = prob_fake
     else:
         label = "Potencialmente Real"
-        confidence_percent = 1 - confidence_score
-        
-    return label, f"{confidence_percent:.2%}"
+        confidence = 1.0 - prob_fake
+
+    return label, f"{confidence:.2%}"
 
 # ---------------------------------------------------------------------------
-# COMPONENTE 3: EXPLICABILIDAD CON GRAD-CAM (Lógica corregida)
+# GRAD-CAM (corrección del cálculo del heatmap)
 # ---------------------------------------------------------------------------
-def generate_grad_cam(face_image, model, last_conv_layer_name="block14_sepconv2_act"):
+def generate_grad_cam(face_image, model, last_conv_layer_name=None):
     """
-    Genera Grad-CAM para la única salida binaria del modelo.
+    face_image: RGB uint8 array (H,W,3)
+    Retorna: RGB uint8 array con heatmap superpuesto
     """
+
     if face_image is None:
         return None
-        
-    img_array = tf.keras.applications.xception.preprocess_input(face_image.copy())
-    img_array_expanded = np.expand_dims(img_array, axis=0)
 
-    grad_model = tf.keras.models.Model(
-        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
-    )
-    
-    with tf.GradientTape() as tape:
-        last_conv_layer_output, preds = grad_model(img_array_expanded)
-        
-        # --- CAMBIO CRÍTICAL 3: EXPLICAR LA SALIDA BINARIA ---
-        # No usamos argmax (eso es para 1000 clases)
-        # Explicamos la única neurona de salida (índice 0)
-        class_channel = preds[:, 0]
+    # Determinar capa conv si no se pasó explicitamente
+    if last_conv_layer_name is None:
+        last_conv_layer_name = find_last_conv_layer(model)
+        if last_conv_layer_name is None:
+            print("No se encontró una capa convolucional en el modelo para Grad-CAM.")
+            return None
 
-    grads = tape.gradient(class_channel, last_conv_layer_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-    last_conv_layer_output = last_conv_layer_output[0]
-    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon())
-    heatmap = heatmap.numpy()
+    try:
+        face = face_image.astype(np.float32)
+        x = (face.copy() / 255.0)
+        x_exp = np.expand_dims(x, axis=0)
 
-    # Redimensionar y superponer
-    heatmap = cv2.resize(heatmap, (face_image.shape[1], face_image.shape[0]))
-    heatmap = np.uint8(255 * heatmap)
-    heatmap_colored = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET) # Mapa de calor (BGR)
-    
-    # --- Corrección de color: CV2 necesita BGR, PIL/Gradio necesita RGB ---
-    face_image_bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR) # Convertir cara a BGR
-    superimposed_img_bgr = cv2.addWeighted(face_image_bgr, 0.6, heatmap_colored, 0.4, 0)
-    superimposed_img_rgb = cv2.cvtColor(superimposed_img_bgr, cv2.COLOR_BGR2RGB) # Convertir de vuelta a RGB
-    
-    return superimposed_img_rgb
+        grad_model = tf.keras.models.Model(
+            inputs=model.inputs,
+            outputs=[model.get_layer(last_conv_layer_name).output, model.output]
+        )
+
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(x_exp)
+            # explicación de la neurona 0 (salida sigmoide)
+            class_channel = predictions[:, 0]
+
+        grads = tape.gradient(class_channel, conv_outputs)
+        # pooled_grads: promedio en ejes de H y W
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+        conv_outputs = conv_outputs[0]  # quitar dimensión batch -> (H, W, C)
+        # multiplicación por canales y suma -> heatmap 2D
+        heatmap = tf.reduce_sum(tf.multiply(conv_outputs, pooled_grads), axis=-1)
+        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon())
+        heatmap = heatmap.numpy()
+
+        # resize a tamaño de la cara original y crear color map
+        heatmap = cv2.resize(heatmap, (face_image.shape[1], face_image.shape[0]))
+        heatmap_uint8 = np.uint8(255 * heatmap)
+        heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)  # BGR
+
+        # convertir face a BGR para mezclar, luego volver a RGB
+        face_bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
+        superimposed_bgr = cv2.addWeighted(face_bgr, 0.6, heatmap_color, 0.4, 0)
+        superimposed_rgb = cv2.cvtColor(superimposed_bgr, cv2.COLOR_BGR2RGB)
+
+        return superimposed_rgb
+    except Exception as e:
+        print(f"Error en generate_grad_cam: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
-# FUNCIÓN INTEGRADORA PARA GRADIO (Modificada para eficiencia)
+# FUNCION PRINCIPAL PARA GRADIO
 # ---------------------------------------------------------------------------
-def run_detection_gradio(pil_image):
-    """
-    Función principal que usa Gradio. No guarda archivos temporales.
-    """
-    # --- CAMBIO CRÍTICAL 4: PROCESAR EN MEMORIA ---
-    # Convertir de PIL (de Gradio) a NumPy array (RGB)
-    image_np_rgb = np.array(pil_image)
+def run_detection_gradio(pil_img):
+    # Convertir PIL a numpy RGB
+    image_np = np.array(pil_img.convert("RGB"))
+    face_arr, original_img, coords = preprocess_face(image_np)
 
-    # 1. Preprocesar la imagen en memoria
-    processed_face, original_img_rgb, face_coords = preprocess_face(image_np_rgb)
-    
-    if processed_face is None:
-        # Si no hay cara, solo muestra la imagen original
-        return pil_image, "No se detectó ningún rostro en la imagen.", None
+    # Leer metadatos
+    metadata_summary = extract_image_metadata(pil_img)
 
-    # 2. Clasificar
-    label, confidence = classify_face(processed_face, classification_model)
-    
-    # 3. Generar XAI
-    heatmap_img = generate_grad_cam(processed_face, classification_model)
+    if face_arr is None:
+        return pil_img, "No se detectó ningún rostro en la imagen.", None, metadata_summary
 
-    # 4. Dibujar recuadro en la imagen original
-    img_with_box = original_img_rgb.copy()
-    if face_coords is not None:
-        x, y, w, h = face_coords
-        # Dibujar en la imagen RGB (por eso el color es (0, 255, 0))
-        cv2.rectangle(img_with_box, (x, y), (x+w, y+h), (0, 255, 0), 3)
+    label, confidence = classify_face(face_arr, classification_model)
+    heatmap_img = generate_grad_cam(face_arr, classification_model)
+
+    # Dibujar bounding box sobre la imagen original (RGB)
+    img_box = original_img.copy()
+    if coords is not None:
+        x, y, w, h = coords
+        img_box_bgr = cv2.cvtColor(img_box, cv2.COLOR_RGB2BGR)
+        cv2.rectangle(img_box_bgr, (x, y), (x + w, y + h), (0, 255, 0), 3)
+        img_box = cv2.cvtColor(img_box_bgr, cv2.COLOR_BGR2RGB)
 
     return (
-        Image.fromarray(img_with_box),
+        Image.fromarray(img_box),
         f"{label} (Confianza: {confidence})",
-        Image.fromarray(heatmap_img) if heatmap_img is not None else None
+        Image.fromarray(heatmap_img) if heatmap_img is not None else None,
+        metadata_summary
     )
-
 # ---------------------------------------------------------------------------
 # INTERFAZ GRADIO
 # ---------------------------------------------------------------------------
@@ -187,12 +232,13 @@ demo = gr.Interface(
     fn=run_detection_gradio,
     inputs=gr.Image(type="pil", label="Sube una imagen"),
     outputs=[
-        gr.Image(type="pil", label="Rostro Detectado"),
+        gr.Image(type="pil", label="Imagen con rostro"),
         gr.Textbox(label="Resultado del modelo"),
-        gr.Image(type="pil", label="Mapa de Calor (Grad-CAM)")
+        gr.Image(type="pil", label="Mapa de Calor (Grad-CAM)"),
+        gr.Textbox(label="Metadatos EXIF")
     ],
     title="Detector de Deepfakes con Explicabilidad (XAI)",
-    description="Sube una imagen para analizarla con el modelo Xception. El modelo clasificará el rostro y Grad-CAM mostrará *por qué*."
+    description="Sube una imagen para analizarla con el modelo y visualizar sus metadatos EXIF."
 )
 
 # ---------------------------------------------------------------------------
@@ -200,6 +246,4 @@ demo = gr.Interface(
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("Iniciando interfaz de Gradio...")
-    print("Abre la siguiente URL en tu navegador:")
-    # 'share=False' es más seguro y te dará el enlace local http://127.0.0.1:7860
-    demo.launch(server_port=7860, share=False)
+    demo.launch(server_port=SERVER_PORT, share=USE_PUBLIC_SHARE)
