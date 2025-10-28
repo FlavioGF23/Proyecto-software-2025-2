@@ -27,7 +27,7 @@ if not os.path.exists(MODEL_PATH):
 try:
     classification_model = tf.keras.models.load_model(MODEL_PATH, compile=False)
     print(f"Modelo cargado desde {MODEL_PATH}")
-    classification_model.summary()
+    
 except Exception as e:
     print("Error al cargar el modelo. Verifica que sea un modelo Keras/TensorFlow compatible.")
     raise
