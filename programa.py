@@ -6,9 +6,9 @@ from PIL import Image
 import warnings
 import gradio as gr
 from PIL.ExifTags import TAGS, GPSTAGS
-import librosa               #  Para procesar audio
-import matplotlib.pyplot as plt # Para crear espectrogramas
-from io import BytesIO       # Para manejar imágenes en memoria
+import librosa  # Para procesar audio
+import matplotlib.pyplot as plt  # Para crear espectrogramas
+from io import BytesIO  # Para manejar imágenes en memoria
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 tf.get_logger().setLevel('ERROR')
@@ -16,8 +16,8 @@ tf.get_logger().setLevel('ERROR')
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-IMAGE_MODEL_PATH = "cnn_model.h5"  # El que estás entrenando en Colab
-AUDIO_MODEL_PATH = "audio_model.h5"  # El que entrenaremos después
+IMAGE_MODEL_PATH = "cnn_model.h5"
+AUDIO_MODEL_PATH = "audio_model.h5"
 SERVER_PORT = 7860
 USE_PUBLIC_SHARE = True
 
@@ -29,7 +29,7 @@ USE_PUBLIC_SHARE = True
 print("Cargando modelo de IMAGEN...")
 if not os.path.exists(IMAGE_MODEL_PATH):
     print(f"ADVERTENCIA: No se encontró el modelo en: {IMAGE_MODEL_PATH}.")
-    print("La pestaña de IMAGEN no funcionará hasta que el modelo esté en la carpeta.")
+    print("La pestaña de IMAGEN y VIDEO no funcionará hasta que el modelo esté en la carpeta.")
     image_model = None
 else:
     try:
@@ -68,7 +68,7 @@ smile_detector = cv2.CascadeClassifier(smile_cascade_path)
 profile_detector = cv2.CascadeClassifier(profile_cascade_path)
 
 # ===========================================================================
-# SECCIÓN 1: LÓGICA DE ANÁLISIS DE IMAGEN 
+# SECCIÓN 1: LÓGICA DE ANÁLISIS DE IMAGEN
 # ===========================================================================
 
 def find_last_conv_layer(model):
@@ -97,6 +97,35 @@ def extract_image_metadata(pil_img):
     else:
         meta_text += "\nNo hay información extra en PIL.info.\n"
     return meta_text.strip()
+
+# --- NUEVA FUNCIÓN ---
+def analyze_metadata_for_ai(metadata_text):
+    """
+    Analiza el texto de metadatos en busca de palabras clave
+    comunes de generación de IA.
+    """
+    clues = []
+    metadata_lower = metadata_text.lower()
+
+    # Lista de palabras clave que buscamos (podemos expandirla)
+    ai_keywords = [
+        "stable diffusion", "sd-v1", "sd-v2", "sdxl",
+        "midjourney", "parameters:", "prompt:", "negative prompt:",
+        "model hash:", "comfyui", "a1111", "dall-e", "civitai",
+        "generat(ed|ive) ai", "photoshop (ai|generative)","photoshop","x0cAI"
+    ]
+
+    for key in ai_keywords:
+        if key in metadata_lower:
+            # Añade la palabra clave encontrada (sin duplicados)
+            if key not in clues:
+                clues.append(key)
+
+    if not clues:
+        return "Metadatos Limpios: No se encontraron pistas obvias de IA."
+    else:
+        # Unimos las pistas encontradas en un string
+        return f"⚠️ Pistas de IA Encontradas: {', '.join(clues)}"
 
 def preprocess_face(image_array_rgb, target_size=(128, 128)):
     try:
@@ -153,7 +182,7 @@ def generate_grad_cam(face_image, model):
             class_channel = predictions[:, 0]
         grads = tape.gradient(class_channel, conv_outputs)
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_outputs = conv_outputs[0] 
+        conv_outputs = conv_outputs[0]
         heatmap = tf.reduce_sum(tf.multiply(conv_outputs, pooled_grads), axis=-1)
         heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon())
         heatmap = heatmap.numpy()
@@ -162,20 +191,23 @@ def generate_grad_cam(face_image, model):
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         face_bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
         superimposed_bgr = cv2.addWeighted(face_bgr, 0.6, heatmap_color, 0.4, 0)
-        superimposed_rgb = cv2.cvtColor(superimposed_bgr, cv2.COLOR_BGR2RGB)
+        superimposed_rgb = cv2.cvtColor(superimposed_bgr, cv2.COLOR_BGR_RGB)
         return superimposed_rgb
     except Exception as e:
         print(f"Error en generate_grad_cam: {e}")
         return None
 
-# --- FUNCIÓN PRINCIPAL DE IMAGEN ---
+# --- FUNCIÓN PRINCIPAL DE IMAGEN (MODIFICADA) ---
 def analyze_image(pil_img):
     if image_model is None:
         raise gr.Error(f"El modelo de imagen '{IMAGE_MODEL_PATH}' no está cargado.")
-    
+
     image_np = np.array(pil_img.convert("RGB"))
     face_arr, original_img, coords, original_gray = preprocess_face(image_np)
+
+    # --- MODIFICACIÓN: Llamar a ambas funciones de metadatos ---
     metadata_summary = extract_image_metadata(pil_img)
+    ai_metadata_verdict = analyze_metadata_for_ai(metadata_summary)
 
     if face_arr is None:
         label, confidence, heatmap_img = "No se detectó rostro", "N/A", None
@@ -208,15 +240,115 @@ def analyze_image(pil_img):
 
     img_box = cv2.cvtColor(img_box_bgr, cv2.COLOR_BGR2RGB)
 
+    # --- MODIFICACIÓN: Devolver 5 valores ---
     return (
         Image.fromarray(img_box),
         f"{label} (Confianza: {confidence})",
         Image.fromarray(heatmap_img) if heatmap_img is not None else None,
-        metadata_summary
+        metadata_summary,
+        ai_metadata_verdict  # <- Nueva salida
     )
 
 # ===========================================================================
-# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO 
+# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO (NUEVA SECCIÓN)
+# ===========================================================================
+
+def analyze_video(video_path):
+    """
+    Analiza un archivo de video cuadro por cuadro (1fps)
+    para detectar deepfakes.
+    """
+    if video_path is None:
+        return "Por favor, sube un archivo de video."
+
+    # Validar que el modelo de imagen esté cargado
+    if image_model is None:
+        raise gr.Error(f"El modelo de imagen '{IMAGE_MODEL_PATH}' no está cargado. El análisis de video no puede continuar.")
+
+    print(f"Iniciando análisis de video: {video_path}")
+
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return "Error: No se pudo abrir el archivo de video."
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        # Asegurarnos que fps sea un número válido > 0
+        frame_skip = int(fps) if fps > 0 else 1
+
+        fake_scores = []
+        real_scores = []
+        frames_analyzed = 0
+        frame_count = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break  # Termina el bucle si no hay más cuadros
+
+            # Estrategia de mitigación: Analizar ~1 cuadro por segundo
+            if frame_count % frame_skip == 0:
+                frames_analyzed += 1
+
+                # Convertir el cuadro (BGR) a RGB para PIL/TF
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                # REUTILIZAMOS nuestras funciones de imagen
+                # Pasamos el detector de rostros (face_detector) que está cargado globalmente
+                face_arr, _, _, _ = preprocess_face(frame_rgb)
+
+                if face_arr is not None:
+                    # Pasamos el modelo (image_model) que está cargado globalmente
+                    label, confidence_str = classify_face(face_arr, image_model)
+
+                    # Convertir "95.00%" a un número 0.95
+                    score = float(confidence_str.replace('%', '')) / 100.0
+
+                    if label == "Potencialmente Falso (Fake)":
+                        fake_scores.append(score)
+                    else:
+                        real_scores.append(score)
+
+            frame_count += 1
+
+        cap.release()
+
+        # --- Generar el Reporte Final ---
+        total_seconds = frame_count / (fps if fps > 0 else 1)
+
+        if not fake_scores and not real_scores:
+            return (
+                f"Análisis Completo (Duración: {total_seconds:.1f}s):\n"
+                f"No se detectaron rostros en los {frames_analyzed} cuadros analizados."
+            )
+
+        avg_fake = np.mean(fake_scores) if fake_scores else 0
+        max_fake = np.max(fake_scores) if fake_scores else 0
+        avg_real = np.mean(real_scores) if real_scores else 0
+
+        report = (
+            f"--- Reporte de Análisis de Video ---\n"
+            f"Duración Total: {total_seconds:.1f} segundos\n"
+            f"Cuadros Analizados: {frames_analyzed} (a ~1 fps)\n"
+            f"Cuadros con Rostros 'Fake': {len(fake_scores)}\n"
+            f"Cuadros con Rostros 'Real': {len(real_scores)}\n\n"
+            f"--- Estadísticas 'Fake' ---\n"
+            f"Puntuación Máxima de Falsedad: {max_fake:.2%}\n"
+            f"Puntuación Promedio de Falsedad: {avg_fake:.2%}\n\n"
+            f"--- Estadísticas 'Real' ---\n"
+            f"Puntuación Promedio de Realidad: {avg_real:.2%}\n"
+        )
+
+        print("Análisis de video completado.")
+        return report
+
+    except Exception as e:
+        print(f"Error en analyze_video: {e}")
+        return f"Error durante el análisis: {e}"
+
+
+# ===========================================================================
+# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO
 # ===========================================================================
 
 def preprocess_audio(audio_path, target_size=(128, 128)):
@@ -227,33 +359,33 @@ def preprocess_audio(audio_path, target_size=(128, 128)):
     try:
         # Cargar archivo de audio
         y, sr = librosa.load(audio_path, sr=None)
-        
+
         # Crear espectrograma Mel
         mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
-        
+
         # --- Convertir el espectrograma (array) en una imagen PIL ---
         # Usamos Matplotlib para "dibujar" el espectrograma
         fig = plt.figure(figsize=(target_size[0]/100, target_size[1]/100), frameon=False)
         ax = plt.Axes(fig, [0., 0., 1., 1.])
         ax.set_axis_off()
         fig.add_axes(ax)
-        
+
         # Dibujar el espectrograma sin bordes, ejes, etc.
         librosa.display.specshow(log_mel_spect, sr=sr, ax=ax)
-        
+
         # Guardar la imagen en un buffer de memoria
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
         plt.close(fig)
         buf.seek(0)
-        
+
         # Cargar la imagen del buffer usando PIL
         spectrogram_pil = Image.open(buf).convert('RGB').resize(target_size, Image.LANCZOS)
-        
+
         # Convertir a array de numpy
         spectrogram_arr = np.array(spectrogram_pil).astype(np.uint8)
-        
+
         return spectrogram_arr, spectrogram_pil
 
     except Exception as e:
@@ -272,19 +404,19 @@ def analyze_audio(audio_path):
 
     # 1. Pre-procesar el audio
     spectrogram_arr, spectrogram_pil = preprocess_audio(audio_path)
-    
+
     if spectrogram_arr is None:
         return "Error procesando el audio", None
 
     # 2. Preparar para el modelo (igual que 'classify_face')
     x = (spectrogram_arr.astype(np.float32) / 255.0)
     x = np.expand_dims(x, axis=0)
-    
+
     # 3. Predecir (Usando el modelo de audio)
     pred = audio_model.predict(x, verbose=0)
     pred_val = float(np.squeeze(pred))
     prob_fake = np.clip(pred_val, 0.0, 1.0)
-    
+
     threshold = 0.5
     if prob_fake > threshold:
         label = f"Voz Potencialmente Falsa (Fake)\n(Confianza: {prob_fake:.2%})"
@@ -296,19 +428,19 @@ def analyze_audio(audio_path):
 
 
 # ===========================================================================
-# SECCIÓN 3: INTERFAZ DE GRADIO 
+# SECCIÓN 3: INTERFAZ DE GRADIO (MODIFICADA)
 # ===========================================================================
 
 with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
     gr.Markdown(
         """
         # Detector Multimodal de Deepfakes con XAI
-        Proyecto de Software (CIB02-N). Sube una imagen o un audio para el análisis forense.
+        Proyecto de Software (CIB02-N). Sube una imagen, video o audio para el análisis forense.
         """
     )
-    
+
     with gr.Tabs():
-        # --- PESTAÑA 1: ANÁLISIS DE IMAGEN ---
+        # --- PESTAÑA 1: ANÁLISIS DE IMAGEN (MODIFICADA) ---
         with gr.TabItem("Análisis de Imagen "):
             gr.Markdown("Sube una **imagen** para la detección de deepfake facial, XAI y análisis de rasgos.")
             with gr.Row(variant="panel"):
@@ -316,20 +448,33 @@ with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
                 with gr.Column(scale=1):
                     image_in = gr.Image(type="pil", label="Subir Imagen")
                     image_button = gr.Button("Analizar Imagen", variant="primary")
-                    
+
                 # Columna de Salidas
                 with gr.Column(scale=2):
                     image_out_label = gr.Textbox(label="Resultado del Modelo")
+                    # --- NUEVO COMPONENTE (Indentación corregida) ---
+                    image_out_ai_meta = gr.Textbox(label="Análisis Metadatos IA")
                     image_out_features = gr.Image(type="pil", label="Imagen con Rasgos Detectados")
-                    
-                    with gr.Row():
-                        image_out_heatmap = gr.Image(type="pil", label="Mapa de Calor (Grad-CAM)")
-                        image_out_meta = gr.Textbox(label="Metadatos EXIF / IA")
 
-            # (Futuro: Añadir componente del video)
-            
+                    with gr.Accordion("Ver Análisis Forense Detallado", open=False):
+                        with gr.Row():
+                            image_out_heatmap = gr.Image(type="pil", label="Mapa de Calor (Grad-CAM)")
+                            image_out_meta = gr.Textbox(label="Metadatos EXIF / IA (Raw)")
 
-        # --- PESTAÑA 2: ANÁLISIS DE AUDIO ---
+        # --- PESTAÑA 2: ANÁLISIS DE VIDEO (NUEVA PESTAÑA) ---
+        with gr.TabItem("Análisis de Video"):
+            gr.Markdown("Sube un archivo de **video** (.mp4, .mov, etc.) para la detección de deepfake cuadro por cuadro (a ~1 fps).")
+            with gr.Row(variant="panel"):
+                # Columna de Entradas
+                with gr.Column(scale=1):
+                    video_in = gr.Video(label="Subir Video")
+                    video_button = gr.Button("Analizar Video", variant="primary")
+
+                # Columna de Salidas
+                with gr.Column(scale=1):
+                    video_out_report = gr.Textbox(label="Reporte de Análisis de Video", lines=15)
+
+        # --- PESTAÑA 3: ANÁLISIS DE AUDIO ---
         with gr.TabItem("Análisis de Audio"):
             gr.Markdown("Sube un archivo de **audio** (.wav, .mp3) para la detección de clonación de voz.")
             with gr.Row(variant="panel"):
@@ -337,21 +482,35 @@ with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
                 with gr.Column(scale=1):
                     audio_in = gr.Audio(type="filepath", label="Subir Audio")
                     audio_button = gr.Button("Analizar Audio", variant="primary")
-                
+
                 # Columna de Salidas
                 with gr.Column(scale=1):
                     audio_out_label = gr.Label(label="Resultado del Modelo")
                     audio_out_spec = gr.Image(type="pil", label="Espectrograma Mel")
-    
-    # Clics de los botones 
-    
-    # Clic de la pestaña de Imagen
+
+    # Clics de los botones
+
+    # Clic de la pestaña de Imagen (MODIFICADO)
     image_button.click(
         fn=analyze_image,
         inputs=[image_in],
-        outputs=[image_out_features, image_out_label, image_out_heatmap, image_out_meta]
+        # Orden de salidas actualizado a 5 componentes
+        outputs=[
+            image_out_features,
+            image_out_label,
+            image_out_heatmap,
+            image_out_meta,
+            image_out_ai_meta
+        ]
     )
-    
+
+    # Clic de la pestaña de Video (NUEVO)
+    video_button.click(
+        fn=analyze_video,
+        inputs=[video_in],
+        outputs=[video_out_report]
+    )
+
     # Clic de la pestaña de Audio
     audio_button.click(
         fn=analyze_audio,
