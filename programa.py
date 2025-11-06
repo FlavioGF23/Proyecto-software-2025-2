@@ -16,9 +16,11 @@ tf.get_logger().setLevel('ERROR')
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-IMAGE_MODEL_PATH = "cnn_model.h5"
-AUDIO_MODEL_PATH = "audio_model.h5"
+IMAGE_MODEL_PATH = "xception_deepfake_video.h5"
+AUDIO_MODEL_PATH = "deepfake_audio_model.h5"
 SERVER_PORT = 7860
+AUDIO_HEIGHT = 128 
+AUDIO_WIDTH = 256
 USE_PUBLIC_SHARE = True
 
 # ---------------------------------------------------------------------------
@@ -107,7 +109,7 @@ def analyze_metadata_for_ai(metadata_text):
     clues = []
     metadata_lower = metadata_text.lower()
 
-    # Lista de palabras clave que buscamos (podemos expandirla)
+    # Lista de palabras clave que buscamos
     ai_keywords = [
         "stable diffusion", "sd-v1", "sd-v2", "sdxl",
         "midjourney", "parameters:", "prompt:", "negative prompt:",
@@ -127,7 +129,7 @@ def analyze_metadata_for_ai(metadata_text):
         # Unimos las pistas encontradas en un string
         return f"⚠️ Pistas de IA Encontradas: {', '.join(clues)}"
 
-def preprocess_face(image_array_rgb, target_size=(128, 128)):
+def preprocess_face(image_array_rgb, target_size=(244,244)): # Usa 224x224
     try:
         image_np = np.asarray(image_array_rgb).astype(np.uint8)
         img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
@@ -139,6 +141,8 @@ def preprocess_face(image_array_rgb, target_size=(128, 128)):
 
         x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
         face_rgb = image_np[y:y+h, x:x+w]
+        
+        # El modelo Xception espera 224x224
         face_pil = Image.fromarray(face_rgb).resize(target_size, Image.LANCZOS)
         face_arr = np.array(face_pil).astype(np.uint8)
         return face_arr, image_np, (x, y, w, h), gray
@@ -164,6 +168,7 @@ def classify_face(face_image, model):
     return label, f"{confidence:.2%}"
 
 def generate_grad_cam(face_image, model):
+
     if face_image is None: return None
     last_conv_layer_name = find_last_conv_layer(model)
     if last_conv_layer_name is None:
@@ -191,13 +196,13 @@ def generate_grad_cam(face_image, model):
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         face_bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
         superimposed_bgr = cv2.addWeighted(face_bgr, 0.6, heatmap_color, 0.4, 0)
-        superimposed_rgb = cv2.cvtColor(superimposed_bgr, cv2.COLOR_BGR_RGB)
+        superimposed_rgb = cv2.cvtColor(superimposed_bgr, cv2.COLOR_BGR2RGB)
         return superimposed_rgb
     except Exception as e:
         print(f"Error en generate_grad_cam: {e}")
         return None
 
-# --- FUNCIÓN PRINCIPAL DE IMAGEN (MODIFICADA) ---
+# --- FUNCIÓN PRINCIPAL DE IMAGEN---
 def analyze_image(pil_img):
     if image_model is None:
         raise gr.Error(f"El modelo de imagen '{IMAGE_MODEL_PATH}' no está cargado.")
@@ -205,7 +210,7 @@ def analyze_image(pil_img):
     image_np = np.array(pil_img.convert("RGB"))
     face_arr, original_img, coords, original_gray = preprocess_face(image_np)
 
-    # --- MODIFICACIÓN: Llamar a ambas funciones de metadatos ---
+    # --- Llamar a ambas funciones de metadatos ---
     metadata_summary = extract_image_metadata(pil_img)
     ai_metadata_verdict = analyze_metadata_for_ai(metadata_summary)
 
@@ -240,13 +245,13 @@ def analyze_image(pil_img):
 
     img_box = cv2.cvtColor(img_box_bgr, cv2.COLOR_BGR2RGB)
 
-    # --- MODIFICACIÓN: Devolver 5 valores ---
+    # --- Devolver 5 valores ---
     return (
         Image.fromarray(img_box),
         f"{label} (Confianza: {confidence})",
         Image.fromarray(heatmap_img) if heatmap_img is not None else None,
         metadata_summary,
-        ai_metadata_verdict  # <- Nueva salida
+        ai_metadata_verdict  
     )
 
 # ===========================================================================
@@ -348,30 +353,32 @@ def analyze_video(video_path):
 
 
 # ===========================================================================
-# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO
+# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO (CORRECCIÓN FINAL)
 # ===========================================================================
 
-def preprocess_audio(audio_path, target_size=(128, 128)):
+def preprocess_audio(audio_path, target_height=AUDIO_HEIGHT, target_width=AUDIO_WIDTH):
     """
-    Carga un audio, crea un espectrograma Mel y lo convierte en una
-    imagen de 3 canales (RGB) lista para la CNN.
+    Carga un audio, crea un espectrograma Mel de 128x256,
+    y lo retorna como un array de 1 canal (Grises) y la imagen PIL RGB.
     """
     try:
         # Cargar archivo de audio
         y, sr = librosa.load(audio_path, sr=None)
 
-        # Crear espectrograma Mel
-        mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        # 1. Crear espectrograma Mel con los n_mels correctos (128)
+        # NOTA: librosa.feature.melspectrogram ya maneja el padding/corte 
+        # para una longitud fija si lo hubieras implementado en entrenamiento, 
+        # pero aquí vamos a usar la imagen para redimensionar.
+        mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=target_height)
         log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
 
-        # --- Convertir el espectrograma (array) en una imagen PIL ---
-        # Usamos Matplotlib para "dibujar" el espectrograma
-        fig = plt.figure(figsize=(target_size[0]/100, target_size[1]/100), frameon=False)
+        # --- 2. Generación de la imagen PIL desde Matplotlib ---
+        target_size = (target_width, target_height) # Nota: PIL espera (W, H)
+        fig = plt.figure(figsize=(target_width/100, target_height/100), frameon=False)
         ax = plt.Axes(fig, [0., 0., 1., 1.])
         ax.set_axis_off()
         fig.add_axes(ax)
 
-        # Dibujar el espectrograma sin bordes, ejes, etc.
         librosa.display.specshow(log_mel_spect, sr=sr, ax=ax)
 
         # Guardar la imagen en un buffer de memoria
@@ -381,36 +388,48 @@ def preprocess_audio(audio_path, target_size=(128, 128)):
         buf.seek(0)
 
         # Cargar la imagen del buffer usando PIL
-        spectrogram_pil = Image.open(buf).convert('RGB').resize(target_size, Image.LANCZOS)
-
-        # Convertir a array de numpy
-        spectrogram_arr = np.array(spectrogram_pil).astype(np.uint8)
-
-        return spectrogram_arr, spectrogram_pil
+        spectrogram_pil_rgb = Image.open(buf).resize(target_size, Image.LANCZOS)
+        
+        # 3. CONVERSIÓN A ESCALA DE GRISES ('L') para el modelo CNN
+        spectrogram_pil_gray = spectrogram_pil_rgb.convert('L') # Forma (H, W)
+        
+        # 4. Convertir a array de numpy (Forma: 128, 256)
+        spectrogram_arr_gray = np.array(spectrogram_pil_gray).astype(np.uint8)
+        
+        # Retornamos el array de 1 canal (sin la dimensión final) y la imagen RGB
+        return spectrogram_arr_gray, spectrogram_pil_rgb
 
     except Exception as e:
         print(f"Error procesando audio: {e}")
         return None, None
-
+    
 # --- FUNCIÓN PRINCIPAL DE AUDIO ---
 def analyze_audio(audio_path):
     """
     Función principal para la pestaña de Audio.
     Carga el modelo de audio y analiza el espectrograma.
     """
+    
     if audio_model is None:
         # Si el modelo no está cargado, mostramos un marcador de posición
         raise gr.Error(f"El modelo de audio '{AUDIO_MODEL_PATH}' no está cargado. Esta es una demostración.")
 
     # 1. Pre-procesar el audio
-    spectrogram_arr, spectrogram_pil = preprocess_audio(audio_path)
+    spectrogram_arr_gray, spectrogram_pil = preprocess_audio(audio_path)
 
-    if spectrogram_arr is None:
+    if spectrogram_arr_gray is None:
         return "Error procesando el audio", None
 
     # 2. Preparar para el modelo (igual que 'classify_face')
-    x = (spectrogram_arr.astype(np.float32) / 255.0)
-    x = np.expand_dims(x, axis=0)
+   # Normalización
+    x = (spectrogram_arr_gray.astype(np.float32) / 255.0)
+    
+    # Agrega la dimensión del canal: (128, 128) -> (128, 128, 1)
+    x = np.expand_dims(x, axis=-1) 
+    
+    # Agrega la dimensión del Batch: (128, 128, 1) -> (1, 128, 128, 1)
+    x = np.expand_dims(x, axis=0) 
+    # ¡LA FORMA ES COMPATIBLE AHORA!
 
     # 3. Predecir (Usando el modelo de audio)
     pred = audio_model.predict(x, verbose=0)
