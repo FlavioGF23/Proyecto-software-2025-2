@@ -6,17 +6,33 @@ from PIL import Image
 import warnings
 import gradio as gr
 from PIL.ExifTags import TAGS, GPSTAGS
-import librosa  # Para procesar audio
-import matplotlib.pyplot as plt  # Para crear espectrogramas
-from io import BytesIO  # Para manejar imágenes en memoria
+import librosa 
+import matplotlib.pyplot as plt
+from io import BytesIO 
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 tf.get_logger().setLevel('ERROR')
 
 # ---------------------------------------------------------------------------
-# CONFIG
+# CONFIGURACIÓN (MODIFICADO: Se definen múltiples modelos para el ensamble)
 # ---------------------------------------------------------------------------
-IMAGE_MODEL_PATH = "xception_deepfake_video.h5"
+
+#Pesos del ensamble 
+MODEL_WEIGHTS = {
+    "XCEPTION": 0.2,   
+    "CNN_DEEPFAKE": 0.8  
+}
+
+ENSEMBLE_MODEL_PATHS = {
+   
+    "XCEPTION": "xception_deepfake_video.h5",
+    "CNN_DEEPFAKE": "cnn_model.h5"
+    
+}
+MODEL_INPUT_SIZES = {
+    "XCEPTION": (299, 299),   # Típico de Xception. Si falla, prueba (224, 224).
+    "CNN_DEEPFAKE": (128, 128) # Asumimos 128x128 dado el mensaje de log.
+}
 AUDIO_MODEL_PATH = "deepfake_audio_model.h5"
 SERVER_PORT = 7860
 AUDIO_HEIGHT = 128 
@@ -24,29 +40,44 @@ AUDIO_WIDTH = 256
 USE_PUBLIC_SHARE = True
 
 # ---------------------------------------------------------------------------
-# CARGA DE MODELOS (Imagen y Audio)
+# CARGA DE MODELOS (CORREGIDO PARA COMPATIBILIDAD)
 # ---------------------------------------------------------------------------
+ensemble_models = {}
+print("Cargando Modelos para Ensamble (IMAGEN/VIDEO)...")
 
-# --- Modelo de Imagen  ---
-print("Cargando modelo de IMAGEN...")
-if not os.path.exists(IMAGE_MODEL_PATH):
-    print(f"ADVERTENCIA: No se encontró el modelo en: {IMAGE_MODEL_PATH}.")
-    print("La pestaña de IMAGEN y VIDEO no funcionará hasta que el modelo esté en la carpeta.")
-    image_model = None
-else:
+for name, path in ENSEMBLE_MODEL_PATHS.items():
+    if not os.path.exists(path):
+        print(f" Modelo {name} no encontrado en: {path}. Se omitirá.")
+        continue
+
     try:
-        image_model = tf.keras.models.load_model(IMAGE_MODEL_PATH, compile=False)
-        print(f"Modelo de IMAGEN cargado desde {IMAGE_MODEL_PATH}")
+        model = tf.keras.models.load_model(path, compile=False)
+        ensemble_models[name] = model
+        print(f" Modelo {name} cargado correctamente.")
     except Exception as e:
-        print(f"Error al cargar el modelo de IMAGEN: {e}")
-        image_model = None
+        print(f" Error al cargar {name}: {e}")
+        print(f" Intentando modo de compatibilidad para {name}...")
+        try:
+            model = tf.keras.models.load_model(path, compile=False, safe_mode=True)
+            ensemble_models[name] = model
+            print(f"Modelo {name} cargado en modo compatibilidad.")
+        except Exception as e2:
+            print(f"No se pudo cargar {name} ni en modo compatibilidad: {e2}")
 
-# --- Modelo de Audio (NUEVO, con marcador de posición) ---
+# Verificación de éxito
+if not ensemble_models:
+    print("Ningún modelo del ensamble se cargó correctamente.")
+    image_model_flag = False
+else:
+    image_model_flag = True
+
+# --- Modelo de Audio (Original, no modificado) ---
 print("Cargando modelo de AUDIO...")
 if not os.path.exists(AUDIO_MODEL_PATH):
     print(f"INFO: No se encontró el modelo de AUDIO en: {AUDIO_MODEL_PATH}.")
     print("La pestaña de AUDIO usará marcadores de posición.")
     audio_model = None
+# ... (código para cargar audio_model)
 else:
     try:
         audio_model = tf.keras.models.load_model(AUDIO_MODEL_PATH, compile=False)
@@ -55,8 +86,9 @@ else:
         print(f"Error al cargar el modelo de AUDIO: {e}")
         audio_model = None
 
+
 # ---------------------------------------------------------------------------
-# HAAR CASCADES (Detección de rasgos )
+# HAAR CASCADES (Original, no modificado)
 # ---------------------------------------------------------------------------
 print("Cargando detectores de rasgos (Haar Cascades)...")
 haar_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -65,15 +97,90 @@ eye_cascade_path = "haarcascade_eye.xml"
 smile_cascade_path = "haarcascade_smile.xml"
 profile_cascade_path = "haarcascade_profileface.xml"
 
+
 eye_detector = cv2.CascadeClassifier(eye_cascade_path)
 smile_detector = cv2.CascadeClassifier(smile_cascade_path)
 profile_detector = cv2.CascadeClassifier(profile_cascade_path)
 
 # ===========================================================================
-# SECCIÓN 1: LÓGICA DE ANÁLISIS DE IMAGEN
+# SECCIÓN 1: LÓGICA DE ANÁLISIS DE IMAGEN (MODIFICADO)
 # ===========================================================================
 
+def resize_face_for_model(face_arr, target_size):
+    """Redimensiona el array de rostro a la dimensión específica requerida por un modelo."""
+    # face_arr.shape[:2] es (alto, ancho). target_size es (ancho, alto).
+    target_wh = (target_size[1], target_size[0]) # Asegurar formato (H, W) para comparación con shape
+    
+    # Compara (alto, ancho) del array con el tamaño objetivo (alto, ancho)
+    if face_arr.shape[:2] != target_size:
+        # Redimensiona la imagen usando PIL
+        face_pil = Image.fromarray(face_arr).resize(target_size, Image.LANCZOS)
+        return np.array(face_pil).astype(np.uint8)
+    return face_arr
+
+def classify_ensemble(face_image, ensemble_models):
+    if not ensemble_models: return None, None
+    if face_image is None: return None, None
+    
+    # Usamos la configuración de pesos y tamaños
+    MODEL_INPUT_SIZES = {
+        "XCEPTION": (299, 299),
+        "CNN_DEEPFAKE": (128, 128)
+    }
+    MODEL_WEIGHTS = {
+        "XCEPTION": 0.3,   
+        "CNN_DEEPFAKE": 0.7  
+    }
+    
+    weighted_sum_pred = 0  # Suma ponderada en lugar de suma simple
+    total_weight = 0       # Suma de los pesos de los modelos cargados
+    
+    # 1. Acumular Predicciones Ponderadas
+    for name, model in ensemble_models.items():
+        try:
+            target_size = MODEL_INPUT_SIZES.get(name)
+            weight = MODEL_WEIGHTS.get(name, 0.0) # Obtener el peso, default 0.0
+
+            if target_size is None or weight == 0:
+                print(f"ADVERTENCIA: Saltando {name}. Peso o tamaño de entrada no definido.")
+                continue
+
+            face_input = resize_face_for_model(face_image, target_size)
+            
+            x = (face_input.astype(np.float32).copy() / 255.0)
+            x = np.expand_dims(x, axis=0)
+
+            # Predecir
+            pred = model.predict(x, verbose=0)
+            prob_fake = float(np.squeeze(pred))
+            
+            # CAMBIO CLAVE: Sumar la predicción multiplicada por su peso
+            weighted_sum_pred += prob_fake * weight
+            total_weight += weight
+            
+            print(f"DEBUG: {name} (Peso: {weight}) predice: {prob_fake:.2%}")
+            
+        except Exception as e:
+            print(f"Error en predicción del modelo {name}: {e}")
+            
+    if total_weight == 0:
+        return "Error de Predicción", "0.00%"
+
+    # 2. Promedio y Clasificación por Votación Ponderada
+    # Dividimos la suma ponderada entre la suma total de los pesos cargados (debería ser 1.0)
+    prob_fake = np.clip(weighted_sum_pred / total_weight, 0.0, 1.0)
+    
+    threshold = 0.5
+    if prob_fake > threshold:
+        label = "Potencialmente Falso (Fake) [Ponderado]"
+        confidence = prob_fake
+    else:
+        label = "Potencialmente Real [Ponderado]"
+        confidence = 1.0 - prob_fake
+        
+    return label, f"{confidence:.2%}"
 def find_last_conv_layer(model):
+    # Función original para el respaldo de Grad-CAM
     for layer in reversed(model.layers):
         shape = layer.output_shape if hasattr(layer, "output_shape") else None
         if shape is None: continue
@@ -81,6 +188,7 @@ def find_last_conv_layer(model):
     return None
 
 def extract_image_metadata(pil_img):
+    # (Función original, no modificada)
     meta_text = "Metadatos encontrados:\n"
     try:
         exif_data = pil_img._getexif() if hasattr(pil_img, "_getexif") else None
@@ -100,49 +208,36 @@ def extract_image_metadata(pil_img):
         meta_text += "\nNo hay información extra en PIL.info.\n"
     return meta_text.strip()
 
-# --- NUEVA FUNCIÓN ---
 def analyze_metadata_for_ai(metadata_text):
-    """
-    Analiza el texto de metadatos en busca de palabras clave
-    comunes de generación de IA.
-    """
+    # (Función original, no modificada)
     clues = []
     metadata_lower = metadata_text.lower()
-
-    # Lista de palabras clave que buscamos
     ai_keywords = [
         "stable diffusion", "sd-v1", "sd-v2", "sdxl",
         "midjourney", "parameters:", "prompt:", "negative prompt:",
         "model hash:", "comfyui", "a1111", "dall-e", "civitai",
         "generat(ed|ive) ai", "photoshop (ai|generative)","photoshop","x0cai","ai"
     ]
-
     for key in ai_keywords:
         if key in metadata_lower:
-            # Añade la palabra clave encontrada (sin duplicados)
             if key not in clues:
                 clues.append(key)
-
     if not clues:
         return "Metadatos Limpios: No se encontraron pistas obvias de IA."
     else:
-        # Unimos las pistas encontradas en un string
         return f"⚠️ Pistas de IA Encontradas: {', '.join(clues)}"
 
-def preprocess_face(image_array_rgb, target_size=(244,244)): # Usa 224x224
+def preprocess_face(image_array_rgb, target_size=(244,244)):
+    # (Función original, no modificada)
     try:
         image_np = np.asarray(image_array_rgb).astype(np.uint8)
         img_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
         faces = face_detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
         if len(faces) == 0:
             return None, image_np, None, gray
-
         x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
         face_rgb = image_np[y:y+h, x:x+w]
-        
-        # El modelo Xception espera 224x224
         face_pil = Image.fromarray(face_rgb).resize(target_size, Image.LANCZOS)
         face_arr = np.array(face_pil).astype(np.uint8)
         return face_arr, image_np, (x, y, w, h), gray
@@ -150,22 +245,63 @@ def preprocess_face(image_array_rgb, target_size=(244,244)): # Usa 224x224
         print(f"Error preprocess_face: {e}")
         return None, None, None, None
 
-def classify_face(face_image, model):
+def classify_ensemble(face_image, ensemble_models):
+    
+    if not ensemble_models: return None, None
     if face_image is None: return None, None
-    face = face_image.astype(np.float32)
-    x = (face.copy() / 255.0)
-    x = np.expand_dims(x, axis=0)
-    pred = model.predict(x, verbose=0)
-    pred_val = float(np.squeeze(pred))
-    prob_fake = np.clip(pred_val, 0.0, 1.0)
+        
+    total_pred = 0
+    model_count = 0
+    
+    # Definir input sizes DENTRO de la función para acceder a la constante
+    MODEL_INPUT_SIZES = {
+        "XCEPTION": (299, 299),
+        "CNN_DEEPFAKE": (128, 128)
+    }
+
+    # 1. Acumular Predicciones de Probabilidad (0=Real, 1=Fake)
+    for name, model in ensemble_models.items():
+        try:
+            # 🔑 CAMBIO CLAVE: Redimensionar el rostro a la forma esperada por el modelo
+            target_size = MODEL_INPUT_SIZES.get(name)
+            
+            if target_size is None:
+                # Si no está definido el tamaño, intentamos usar el original y registramos
+                print(f"ADVERTENCIA: Tamaño de entrada no definido para {name}. Usando tamaño original.")
+                face_input = face_image
+            else:
+                face_input = resize_face_for_model(face_image, target_size)
+            
+            # Preparación para la predicción (normalización y batch dimension)
+            x = (face_input.astype(np.float32).copy() / 255.0)
+            x = np.expand_dims(x, axis=0)
+
+            # 2. Predecir
+            pred = model.predict(x, verbose=0)
+            total_pred += float(np.squeeze(pred))
+            model_count += 1
+            print(f"DEBUG: {name} procesado con {target_size}") # DEBUG para verificar el tamaño
+            
+        except Exception as e:
+            print(f"Error en predicción del modelo {name}: {e}")
+
+    # Si ningún modelo predijo, devolvemos error
+    if model_count == 0:
+        return "Error de Predicción", "0.00%"
+
+    # Promedio de las predicciones
+    prob_fake = np.clip(total_pred / model_count, 0.0, 1.0)
+
     threshold = 0.5
     if prob_fake > threshold:
-        label = "Potencialmente Falso (Fake)"
+        label = "Potencialmente Falso (Fake) [Ensamble]"
         confidence = prob_fake
     else:
-        label = "Potencialmente Real"
+        label = "Potencialmente Real [Ensamble]"
         confidence = 1.0 - prob_fake
+
     return label, f"{confidence:.2%}"
+
 
 def generate_grad_cam(face_image, model):
     if face_image is None: return None
@@ -178,6 +314,7 @@ def generate_grad_cam(face_image, model):
         model.get_layer(SPECIFIC_CONV_LAYER_NAME)
         last_conv_layer_name = SPECIFIC_CONV_LAYER_NAME
     except ValueError:
+        # Fallback si no es Xception o la capa fue renombrada
         last_conv_layer_name = find_last_conv_layer(model) 
 
     if last_conv_layer_name is None:
@@ -205,7 +342,6 @@ def generate_grad_cam(face_image, model):
             predictions_tensor = tf.convert_to_tensor(outputs[1]) # Predicción Final
             
             # 4. Indexación segura: Lote 0, Canal 0 (clase 'Fake')
-            # Si el error persiste, pruebe predictions_tensor[0]
             class_channel = predictions_tensor[0, 0] 
             
         # 5. Cálculo de gradientes y mapa de calor
@@ -213,14 +349,22 @@ def generate_grad_cam(face_image, model):
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
         
         # 6. Generación del Heatmap
-        # conv_outputs[0] es la activación del primer (y único) lote
         heatmap = tf.reduce_sum(tf.multiply(conv_outputs[0], pooled_grads), axis=-1) 
         
         heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon())
         
         # --- Visualización (OpenCV) ---
         heatmap = heatmap.numpy()
-        heatmap = cv2.resize(heatmap, (face_image.shape[1], face_image.shape[0]))
+        
+        # 🔑 BLINDAJE CONTRA EL ERROR DE CV2.RESIZE (Assert Failed)
+        h_face, w_face = face_image.shape[0], face_image.shape[1]
+        
+        if h_face <= 0 or w_face <= 0:
+            print(f"ADVERTENCIA: Dimensiones del rostro no válidas: {w_face}x{h_face}. Saltando Grad-CAM.")
+            return None 
+
+        heatmap = cv2.resize(heatmap, (w_face, h_face))
+        
         heatmap_uint8 = np.uint8(255 * heatmap)
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
         
@@ -231,27 +375,43 @@ def generate_grad_cam(face_image, model):
         return superimposed_rgb
         
     except Exception as e:
-        print(f"Error en el cálculo y visualización de Grad-CAM: {e}")
+        # Esto captura cualquier error interno en el flujo de Grad-CAM
+        print(f"Error en el cálculo y visualización de Grad-CAM para XCEPTION: {e}")
         return None
-    
-# --- FUNCIÓN PRINCIPAL DE IMAGEN---
+
+# --- FUNCIÓN PRINCIPAL DE IMAGEN (MODIFICADO: Usa Ensamble)---
+image_model_flag = True
 def analyze_image(pil_img):
-    if image_model is None:
-        raise gr.Error(f"El modelo de imagen '{IMAGE_MODEL_PATH}' no está cargado.")
+    if not image_model_flag:
+        raise gr.Error("ERROR: Ningún modelo de ensamble de imagen está cargado.")
 
     image_np = np.array(pil_img.convert("RGB"))
     face_arr, original_img, coords, original_gray = preprocess_face(image_np)
 
-    # --- Llamar a ambas funciones de metadatos ---
     metadata_summary = extract_image_metadata(pil_img)
     ai_metadata_verdict = analyze_metadata_for_ai(metadata_summary)
 
     if face_arr is None:
         label, confidence, heatmap_img = "No se detectó rostro", "N/A", None
     else:
-        label, confidence = classify_face(face_arr, image_model)
-        heatmap_img = generate_grad_cam(face_arr, image_model)
+        # 1. Clasificación por Ensamble (Usa face_arr, que se redimensiona internamente en classify_ensemble)
+        label, confidence = classify_ensemble(face_arr, ensemble_models)
+        
+        # 2. XAI: Solo se genera Grad-CAM para XCEPTION (DEBE USAR EL TAMAÑO CORRECTO)
+        xception_model = ensemble_models.get("XCEPTION")
+        
+        if xception_model:
+            # 🔑 CORRECCIÓN CLAVE: Redimensionar el input a (299, 299) ANTES de Grad-CAM
+            # Usamos el tamaño definido en la configuración para XCEPTION
+            XCEPTION_SIZE = (299, 299)
+            face_for_xception = resize_face_for_model(face_arr, XCEPTION_SIZE)
+            
+            # Ahora pasamos el rostro redimensionado, compatible con el modelo.
+            heatmap_img = generate_grad_cam(face_for_xception, xception_model)
+        else:
+            heatmap_img = None
 
+    # ... (código de detección de rasgos con Haar Cascades, no modificado) ...
     img_box = original_img.copy()
     img_box_bgr = cv2.cvtColor(img_box, cv2.COLOR_RGB2BGR)
 
@@ -287,20 +447,20 @@ def analyze_image(pil_img):
     )
 
 # ===========================================================================
-# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO 
+# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO (MODIFICADO: Usa Ensamble)
 # ===========================================================================
 
 def analyze_video(video_path):
     """
-    Analiza un archivo de video cuadro por cuadro (1fps)
-    para detectar deepfakes.
+    Analiza un archivo de video cuadro por cuadro (1fps) 
+    aplicando el Ensamble y la Votación.
     """
     if video_path is None:
         return "Por favor, sube un archivo de video."
 
-    # Validar que el modelo de imagen esté cargado
-    if image_model is None:
-        raise gr.Error(f"El modelo de imagen '{IMAGE_MODEL_PATH}' no está cargado. El análisis de video no puede continuar.")
+    # Validar que los modelos de ensamble estén cargados
+    if not ensemble_models:
+         raise gr.Error("ERROR: No hay modelos de ensamble cargados para el análisis de video.")
 
     print(f"Iniciando análisis de video: {video_path}")
 
@@ -310,7 +470,7 @@ def analyze_video(video_path):
             return "Error: No se pudo abrir el archivo de video."
 
         fps = cap.get(cv2.CAP_PROP_FPS)
-        # Asegurarnos que fps sea un número válido > 0
+        # Estrategia de Mitigación: Procesar aproximadamente 1 frame por segundo
         frame_skip = int(fps) if fps > 0 else 1
 
         fake_scores = []
@@ -321,27 +481,22 @@ def analyze_video(video_path):
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
-                break  # Termina el bucle si no hay más cuadros
+                break
 
-            # Estrategia de mitigación: Analizar ~1 cuadro por segundo
             if frame_count % frame_skip == 0:
                 frames_analyzed += 1
 
-                # Convertir el cuadro (BGR) a RGB para PIL/TF
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-                # REUTILIZAMOS nuestras funciones de imagen
-                # Pasamos el detector de rostros (face_detector) que está cargado globalmente
                 face_arr, _, _, _ = preprocess_face(frame_rgb)
 
                 if face_arr is not None:
-                    # Pasamos el modelo (image_model) que está cargado globalmente
-                    label, confidence_str = classify_face(face_arr, image_model)
+                    # 🔑 CAMBIO CLAVE: Usamos la función del ensamble para la clasificación por frame
+                    label, confidence_str = classify_ensemble(face_arr, ensemble_models) 
 
                     # Convertir "95.00%" a un número 0.95
                     score = float(confidence_str.replace('%', '')) / 100.0
 
-                    if label == "Potencialmente Falso (Fake)":
+                    if "Falso" in label:
                         fake_scores.append(score)
                     else:
                         real_scores.append(score)
@@ -350,7 +505,7 @@ def analyze_video(video_path):
 
         cap.release()
 
-        # --- Generar el Reporte Final ---
+        # --- Generar el Reporte Final (Votación Agregada) ---
         total_seconds = frame_count / (fps if fps > 0 else 1)
 
         if not fake_scores and not real_scores:
@@ -361,19 +516,21 @@ def analyze_video(video_path):
 
         avg_fake = np.mean(fake_scores) if fake_scores else 0
         max_fake = np.max(fake_scores) if fake_scores else 0
-        avg_real = np.mean(real_scores) if real_scores else 0
+        
+        # La decisión final se basa en la mayoría de cuadros clasificados como 'Fake'
+        fake_ratio = len(fake_scores) / (len(fake_scores) + len(real_scores))
 
         report = (
-            f"--- Reporte de Análisis de Video ---\n"
+            f"--- Reporte de Análisis de Video (Ensamble) ---\n"
             f"Duración Total: {total_seconds:.1f} segundos\n"
-            f"Cuadros Analizados: {frames_analyzed} (a ~1 fps)\n"
+            f"Cuadros Analizados: {frames_analyzed}\n"
+            f"Ratio de Cuadros Falsos: {fake_ratio:.2%}\n\n"
+            f"VEREDICTO FINAL: {'FALSO' if fake_ratio > 0.5 else 'REAL'} \n"
+            f"(Basado en la mayoría de cuadros del ensamble)\n\n"
+            f"--- Estadísticas Frame-a-Frame ---\n"
+            f"Puntuación Máxima de Falsedad (Frame): {max_fake:.2%}\n"
             f"Cuadros con Rostros 'Fake': {len(fake_scores)}\n"
-            f"Cuadros con Rostros 'Real': {len(real_scores)}\n\n"
-            f"--- Estadísticas 'Fake' ---\n"
-            f"Puntuación Máxima de Falsedad: {max_fake:.2%}\n"
-            f"Puntuación Promedio de Falsedad: {avg_fake:.2%}\n\n"
-            f"--- Estadísticas 'Real' ---\n"
-            f"Puntuación Promedio de Realidad: {avg_real:.2%}\n"
+            f"Cuadros con Rostros 'Real': {len(real_scores)}\n"
         )
 
         print("Análisis de video completado.")
@@ -385,162 +542,104 @@ def analyze_video(video_path):
 
 
 # ===========================================================================
-# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO (CORRECCIÓN FINAL)
+# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO (Original, no modificado)
 # ===========================================================================
 
 def preprocess_audio(audio_path, target_height=AUDIO_HEIGHT, target_width=AUDIO_WIDTH):
-    """
-    Carga un audio, crea un espectrograma Mel de 128x256,
-    y lo retorna como un array de 1 canal (Grises) y la imagen PIL RGB.
-    """
+    # (Función original, no modificada)
     try:
-        # Cargar archivo de audio
         y, sr = librosa.load(audio_path, sr=None)
-
         mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=target_height)
         log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
-
-        # --- 2. Generación de la imagen PIL desde Matplotlib ---
-        target_size = (target_width, target_height) # Nota: PIL espera (W, H)
+        target_size = (target_width, target_height)
         fig = plt.figure(figsize=(target_width/100, target_height/100), frameon=False)
         ax = plt.Axes(fig, [0., 0., 1., 1.])
         ax.set_axis_off()
         fig.add_axes(ax)
-
         librosa.display.specshow(log_mel_spect, sr=sr, ax=ax)
-
-        # Guardar la imagen en un buffer de memoria
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
         plt.close(fig)
         buf.seek(0)
-
-        # Cargar la imagen del buffer usando PIL
         spectrogram_pil_rgb = Image.open(buf).resize(target_size, Image.LANCZOS)
-        
-        # 3. CONVERSIÓN A ESCALA DE GRISES ('L') para el modelo CNN
-        spectrogram_pil_gray = spectrogram_pil_rgb.convert('L') # Forma (H, W)
-        
-        # 4. Convertir a array de numpy (Forma: 128, 256)
+        spectrogram_pil_gray = spectrogram_pil_rgb.convert('L')
         spectrogram_arr_gray = np.array(spectrogram_pil_gray).astype(np.uint8)
-        
-        # Retornamos el array de 1 canal (sin la dimensión final) y la imagen RGB
         return spectrogram_arr_gray, spectrogram_pil_rgb
-
     except Exception as e:
         print(f"Error procesando audio: {e}")
         return None, None
     
-# --- FUNCIÓN PRINCIPAL DE AUDIO ---
 def analyze_audio(audio_path):
-    """
-    Función principal para la pestaña de Audio.
-    Carga el modelo de audio y analiza el espectrograma.
-    """
-    
+    # (Función original, no modificada)
     if audio_model is None:
-        # Si el modelo no está cargado, mostramos un marcador de posición
         raise gr.Error(f"El modelo de audio '{AUDIO_MODEL_PATH}' no está cargado. Esta es una demostración.")
-
-    # 1. Pre-procesar el audio
     spectrogram_arr_gray, spectrogram_pil = preprocess_audio(audio_path)
-
     if spectrogram_arr_gray is None:
         return "Error procesando el audio", None
-
-    # 2. Preparar para el modelo (igual que 'classify_face')
-   # Normalización
     x = (spectrogram_arr_gray.astype(np.float32) / 255.0)
-    
-    # Agrega la dimensión del canal: (128, 128) -> (128, 128, 1)
     x = np.expand_dims(x, axis=-1) 
-    
-    # Agrega la dimensión del Batch: (128, 128, 1) -> (1, 128, 128, 1)
     x = np.expand_dims(x, axis=0) 
-
-    # 3. Predecir (Usando el modelo de audio)
     pred = audio_model.predict(x, verbose=0)
     pred_val = float(np.squeeze(pred))
     prob_fake = np.clip(pred_val, 0.0, 1.0)
-
     threshold = 0.5
     if prob_fake > threshold:
         label = f"Voz Potencialmente Falsa (Fake)\n(Confianza: {prob_fake:.2%})"
     else:
         label = f"Voz Potencialmente Real\n(Confianza: {1.0 - prob_fake:.2%})"
-
-    # 4. Devolver la etiqueta y la imagen del espectrograma
     return gr.Label(label, value=label), spectrogram_pil
 
 
 # ===========================================================================
-# SECCIÓN 3: INTERFAZ DE GRADIO (MODIFICADA)
+# SECCIÓN 3: INTERFAZ DE GRADIO (Original, no modificado)
 # ===========================================================================
 
 with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
     gr.Markdown(
         """
-        # Detector Multimodal de Deepfakes con XAI
-        Proyecto de Software (CIB02-N). Sube una imagen, video o audio para el análisis forense.
+        # Detector Multimodal de Deepfakes con XAI (Ensamble)
+        Proyecto de Software (CIB02-N). Sistema de Ensamble y XAI para un análisis forense más robusto.
         """
     )
-
+    # ... (El resto de la interfaz Gradio, tabs y clicks, permanece igual) ...
     with gr.Tabs():
-        # --- PESTAÑA 1: ANÁLISIS DE IMAGEN (MODIFICADA) ---
         with gr.TabItem("Análisis de Imagen "):
-            gr.Markdown("Sube una **imagen** para la detección de deepfake facial, XAI y análisis de rasgos.")
+            gr.Markdown("Sube una **imagen** para la detección de deepfake facial, XAI y análisis de rasgos (Clasificación por Ensamble).")
             with gr.Row(variant="panel"):
-                # Columna de Entradas
                 with gr.Column(scale=1):
                     image_in = gr.Image(type="pil", label="Subir Imagen")
                     image_button = gr.Button("Analizar Imagen", variant="primary")
-
-                # Columna de Salidas
                 with gr.Column(scale=2):
-                    image_out_label = gr.Textbox(label="Resultado del Modelo")
-                    # --- NUEVO COMPONENTE (Indentación corregida) ---
+                    image_out_label = gr.Textbox(label="Resultado del Ensamble")
                     image_out_ai_meta = gr.Textbox(label="Análisis Metadatos IA")
                     image_out_features = gr.Image(type="pil", label="Imagen con Rasgos Detectados")
-
                     with gr.Accordion("Ver Análisis Forense Detallado", open=False):
                         with gr.Row():
-                            image_out_heatmap = gr.Image(type="pil", label="Mapa de Calor (Grad-CAM)")
+                            image_out_heatmap = gr.Image(type="pil", label="Mapa de Calor (Xception, XAI)")
                             image_out_meta = gr.Textbox(label="Metadatos EXIF / IA (Raw)")
 
-        # --- PESTAÑA 2: ANÁLISIS DE VIDEO  ---
         with gr.TabItem("Análisis de Video"):
-            gr.Markdown("Sube un archivo de **video** (.mp4, .mov, etc.) para la detección de deepfake cuadro por cuadro (a ~1 fps).")
+            gr.Markdown("Sube un archivo de **video** para la detección de deepfake por Votación de Ensamble (a ~1 fps).")
             with gr.Row(variant="panel"):
-                # Columna de Entradas
                 with gr.Column(scale=1):
                     video_in = gr.Video(label="Subir Video")
                     video_button = gr.Button("Analizar Video", variant="primary")
-
-                # Columna de Salidas
                 with gr.Column(scale=1):
-                    video_out_report = gr.Textbox(label="Reporte de Análisis de Video", lines=15)
+                    video_out_report = gr.Textbox(label="Reporte de Votación del Ensamble", lines=15)
 
-        # --- PESTAÑA 3: ANÁLISIS DE AUDIO ---
         with gr.TabItem("Análisis de Audio"):
-            gr.Markdown("Sube un archivo de **audio** (.wav, .mp3) para la detección de clonación de voz.")
+            gr.Markdown("Sube un archivo de **audio** para la detección de clonación de voz.")
             with gr.Row(variant="panel"):
-                # Columna de Entradas
                 with gr.Column(scale=1):
                     audio_in = gr.Audio(type="filepath", label="Subir Audio")
                     audio_button = gr.Button("Analizar Audio", variant="primary")
-
-                # Columna de Salidas
                 with gr.Column(scale=1):
                     audio_out_label = gr.Label(label="Resultado del Modelo")
                     audio_out_spec = gr.Image(type="pil", label="Espectrograma Mel")
 
-    # Clics de los botones
-
-    # Clic de la pestaña de Imagen (MODIFICADO)
     image_button.click(
         fn=analyze_image,
         inputs=[image_in],
-        # Orden de salidas actualizado a 5 componentes
         outputs=[
             image_out_features,
             image_out_label,
@@ -550,23 +649,18 @@ with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
         ]
     )
 
-    # Clic de la pestaña de Video (NUEVO)
     video_button.click(
         fn=analyze_video,
         inputs=[video_in],
         outputs=[video_out_report]
     )
 
-    # Clic de la pestaña de Audio
     audio_button.click(
         fn=analyze_audio,
         inputs=[audio_in],
         outputs=[audio_out_label, audio_out_spec]
     )
 
-# ---------------------------------------------------------------------------
-# EJECUCIÓN
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("Iniciando interfaz de Gradio en pestañas...")
     demo.launch(server_port=SERVER_PORT, share=USE_PUBLIC_SHARE)
