@@ -27,7 +27,7 @@ USE_PUBLIC_SHARE = True
 # CARGA DE MODELOS (Imagen y Audio)
 # ---------------------------------------------------------------------------
 
-# --- Modelo de Imagen (tu código original) ---
+# --- Modelo de Imagen  ---
 print("Cargando modelo de IMAGEN...")
 if not os.path.exists(IMAGE_MODEL_PATH):
     print(f"ADVERTENCIA: No se encontró el modelo en: {IMAGE_MODEL_PATH}.")
@@ -114,7 +114,7 @@ def analyze_metadata_for_ai(metadata_text):
         "stable diffusion", "sd-v1", "sd-v2", "sdxl",
         "midjourney", "parameters:", "prompt:", "negative prompt:",
         "model hash:", "comfyui", "a1111", "dall-e", "civitai",
-        "generat(ed|ive) ai", "photoshop (ai|generative)","photoshop","x0cAI"
+        "generat(ed|ive) ai", "photoshop (ai|generative)","photoshop","x0cai","ai"
     ]
 
     for key in ai_keywords:
@@ -168,40 +168,72 @@ def classify_face(face_image, model):
     return label, f"{confidence:.2%}"
 
 def generate_grad_cam(face_image, model):
-
     if face_image is None: return None
-    last_conv_layer_name = find_last_conv_layer(model)
+    
+    SPECIFIC_CONV_LAYER_NAME = 'block14_sepconv2_act' 
+    last_conv_layer_name = None
+    
+    # 1. Definir la capa convolucional
+    try:
+        model.get_layer(SPECIFIC_CONV_LAYER_NAME)
+        last_conv_layer_name = SPECIFIC_CONV_LAYER_NAME
+    except ValueError:
+        last_conv_layer_name = find_last_conv_layer(model) 
+
     if last_conv_layer_name is None:
-        print("No se encontró una capa convolucional en el modelo para Grad-CAM.")
+        print("ADVERTENCIA: No se encontró una capa convolucional adecuada para Grad-CAM.")
         return None
+        
+    # --- Lógica de Grad-CAM (TensorFlow) ---
     try:
         face = face_image.astype(np.float32)
         x = (face.copy() / 255.0)
         x_exp = np.expand_dims(x, axis=0)
+        
+        # 2. Recrear el modelo con las dos salidas
         grad_model = tf.keras.models.Model(
             inputs=model.inputs,
             outputs=[model.get_layer(last_conv_layer_name).output, model.output]
         )
+        
         with tf.GradientTape() as tape:
-            conv_outputs, predictions = grad_model(x_exp)
-            class_channel = predictions[:, 0]
+            # 3. Llamada al modelo. 'outputs' es una tupla de 2 elementos.
+            outputs = grad_model(x_exp)
+            
+            # FORZAR A TENSOR antes de indexar.
+            conv_outputs = tf.convert_to_tensor(outputs[0]) # Activaciones CONV
+            predictions_tensor = tf.convert_to_tensor(outputs[1]) # Predicción Final
+            
+            # 4. Indexación segura: Lote 0, Canal 0 (clase 'Fake')
+            # Si el error persiste, pruebe predictions_tensor[0]
+            class_channel = predictions_tensor[0, 0] 
+            
+        # 5. Cálculo de gradientes y mapa de calor
         grads = tape.gradient(class_channel, conv_outputs)
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        conv_outputs = conv_outputs[0]
-        heatmap = tf.reduce_sum(tf.multiply(conv_outputs, pooled_grads), axis=-1)
+        
+        # 6. Generación del Heatmap
+        # conv_outputs[0] es la activación del primer (y único) lote
+        heatmap = tf.reduce_sum(tf.multiply(conv_outputs[0], pooled_grads), axis=-1) 
+        
         heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + tf.keras.backend.epsilon())
+        
+        # --- Visualización (OpenCV) ---
         heatmap = heatmap.numpy()
         heatmap = cv2.resize(heatmap, (face_image.shape[1], face_image.shape[0]))
         heatmap_uint8 = np.uint8(255 * heatmap)
         heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        
         face_bgr = cv2.cvtColor(face_image, cv2.COLOR_RGB2BGR)
         superimposed_bgr = cv2.addWeighted(face_bgr, 0.6, heatmap_color, 0.4, 0)
         superimposed_rgb = cv2.cvtColor(superimposed_bgr, cv2.COLOR_BGR2RGB)
+        
         return superimposed_rgb
+        
     except Exception as e:
-        print(f"Error en generate_grad_cam: {e}")
+        print(f"Error en el cálculo y visualización de Grad-CAM: {e}")
         return None
-
+    
 # --- FUNCIÓN PRINCIPAL DE IMAGEN---
 def analyze_image(pil_img):
     if image_model is None:
@@ -255,7 +287,7 @@ def analyze_image(pil_img):
     )
 
 # ===========================================================================
-# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO (NUEVA SECCIÓN)
+# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO 
 # ===========================================================================
 
 def analyze_video(video_path):
@@ -365,10 +397,6 @@ def preprocess_audio(audio_path, target_height=AUDIO_HEIGHT, target_width=AUDIO_
         # Cargar archivo de audio
         y, sr = librosa.load(audio_path, sr=None)
 
-        # 1. Crear espectrograma Mel con los n_mels correctos (128)
-        # NOTA: librosa.feature.melspectrogram ya maneja el padding/corte 
-        # para una longitud fija si lo hubieras implementado en entrenamiento, 
-        # pero aquí vamos a usar la imagen para redimensionar.
         mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=target_height)
         log_mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
 
@@ -429,7 +457,6 @@ def analyze_audio(audio_path):
     
     # Agrega la dimensión del Batch: (128, 128, 1) -> (1, 128, 128, 1)
     x = np.expand_dims(x, axis=0) 
-    # ¡LA FORMA ES COMPATIBLE AHORA!
 
     # 3. Predecir (Usando el modelo de audio)
     pred = audio_model.predict(x, verbose=0)
@@ -480,7 +507,7 @@ with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
                             image_out_heatmap = gr.Image(type="pil", label="Mapa de Calor (Grad-CAM)")
                             image_out_meta = gr.Textbox(label="Metadatos EXIF / IA (Raw)")
 
-        # --- PESTAÑA 2: ANÁLISIS DE VIDEO (NUEVA PESTAÑA) ---
+        # --- PESTAÑA 2: ANÁLISIS DE VIDEO  ---
         with gr.TabItem("Análisis de Video"):
             gr.Markdown("Sube un archivo de **video** (.mp4, .mov, etc.) para la detección de deepfake cuadro por cuadro (a ~1 fps).")
             with gr.Row(variant="panel"):
