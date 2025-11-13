@@ -17,11 +17,7 @@ tf.get_logger().setLevel('ERROR')
 # CONFIGURACIÓN 
 # ---------------------------------------------------------------------------
 
-#Pesos del ensamble 
-MODEL_WEIGHTS = {
-    "XCEPTION": 0,   
-    "CNN_DEEPFAKE": 1  
-}
+
 
 ENSEMBLE_MODEL_PATHS = {
    
@@ -29,9 +25,15 @@ ENSEMBLE_MODEL_PATHS = {
     "CNN_DEEPFAKE": "cnn_model.h5"
     
 }
+#Pesos del ensamble 
+MODEL_WEIGHTS = {
+    "XCEPTION": 0.3,   
+    "CNN_DEEPFAKE": 0.7  
+}
+
 MODEL_INPUT_SIZES = {
-    "XCEPTION": (299, 299),   # Típico de Xception. 
-    "CNN_DEEPFAKE": (128, 128) # Asumimos 128x128 
+    "XCEPTION": (299, 299),    
+    "CNN_DEEPFAKE": (128, 128) 
 }
 AUDIO_MODEL_PATH = "deepfake_audio_model.h5"
 SERVER_PORT = 7860
@@ -128,8 +130,8 @@ def classify_ensemble(face_image, ensemble_models):
         "CNN_DEEPFAKE": (128, 128)
     }
     MODEL_WEIGHTS = {
-        "XCEPTION": 0.2,   
-        "CNN_DEEPFAKE": 0.8  
+        "XCEPTION": 0.3,   
+        "CNN_DEEPFAKE": 0.7 
     }
     
     weighted_sum_pred = 0  # Suma ponderada 
