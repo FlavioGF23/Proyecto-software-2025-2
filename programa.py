@@ -14,13 +14,13 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 tf.get_logger().setLevel('ERROR')
 
 # ---------------------------------------------------------------------------
-# CONFIGURACIÓN (MODIFICADO: Se definen múltiples modelos para el ensamble)
+# CONFIGURACIÓN 
 # ---------------------------------------------------------------------------
 
 #Pesos del ensamble 
 MODEL_WEIGHTS = {
-    "XCEPTION": 0.2,   
-    "CNN_DEEPFAKE": 0.8  
+    "XCEPTION": 0,   
+    "CNN_DEEPFAKE": 1  
 }
 
 ENSEMBLE_MODEL_PATHS = {
@@ -30,8 +30,8 @@ ENSEMBLE_MODEL_PATHS = {
     
 }
 MODEL_INPUT_SIZES = {
-    "XCEPTION": (299, 299),   # Típico de Xception. Si falla, prueba (224, 224).
-    "CNN_DEEPFAKE": (128, 128) # Asumimos 128x128 dado el mensaje de log.
+    "XCEPTION": (299, 299),   # Típico de Xception. 
+    "CNN_DEEPFAKE": (128, 128) # Asumimos 128x128 
 }
 AUDIO_MODEL_PATH = "deepfake_audio_model.h5"
 SERVER_PORT = 7860
@@ -40,7 +40,7 @@ AUDIO_WIDTH = 256
 USE_PUBLIC_SHARE = True
 
 # ---------------------------------------------------------------------------
-# CARGA DE MODELOS (CORREGIDO PARA COMPATIBILIDAD)
+# CARGA DE MODELOS 
 # ---------------------------------------------------------------------------
 ensemble_models = {}
 print("Cargando Modelos para Ensamble (IMAGEN/VIDEO)...")
@@ -71,7 +71,7 @@ if not ensemble_models:
 else:
     image_model_flag = True
 
-# --- Modelo de Audio (Original, no modificado) ---
+# --- Modelo de Audio  ---
 print("Cargando modelo de AUDIO...")
 if not os.path.exists(AUDIO_MODEL_PATH):
     print(f"INFO: No se encontró el modelo de AUDIO en: {AUDIO_MODEL_PATH}.")
@@ -88,7 +88,7 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# HAAR CASCADES (Original, no modificado)
+# HAAR CASCADES 
 # ---------------------------------------------------------------------------
 print("Cargando detectores de rasgos (Haar Cascades)...")
 haar_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -103,12 +103,12 @@ smile_detector = cv2.CascadeClassifier(smile_cascade_path)
 profile_detector = cv2.CascadeClassifier(profile_cascade_path)
 
 # ===========================================================================
-# SECCIÓN 1: LÓGICA DE ANÁLISIS DE IMAGEN (MODIFICADO)
+# SECCIÓN 1: LÓGICA DE ANÁLISIS DE IMAGEN 
 # ===========================================================================
 
 def resize_face_for_model(face_arr, target_size):
     """Redimensiona el array de rostro a la dimensión específica requerida por un modelo."""
-    # face_arr.shape[:2] es (alto, ancho). target_size es (ancho, alto).
+    
     target_wh = (target_size[1], target_size[0]) # Asegurar formato (H, W) para comparación con shape
     
     # Compara (alto, ancho) del array con el tamaño objetivo (alto, ancho)
@@ -128,18 +128,18 @@ def classify_ensemble(face_image, ensemble_models):
         "CNN_DEEPFAKE": (128, 128)
     }
     MODEL_WEIGHTS = {
-        "XCEPTION": 0.3,   
-        "CNN_DEEPFAKE": 0.7  
+        "XCEPTION": 0.2,   
+        "CNN_DEEPFAKE": 0.8  
     }
     
-    weighted_sum_pred = 0  # Suma ponderada en lugar de suma simple
+    weighted_sum_pred = 0  # Suma ponderada 
     total_weight = 0       # Suma de los pesos de los modelos cargados
     
     # 1. Acumular Predicciones Ponderadas
     for name, model in ensemble_models.items():
         try:
             target_size = MODEL_INPUT_SIZES.get(name)
-            weight = MODEL_WEIGHTS.get(name, 0.0) # Obtener el peso, default 0.0
+            weight = MODEL_WEIGHTS.get(name, 0.0) # Obtener el peso
 
             if target_size is None or weight == 0:
                 print(f"ADVERTENCIA: Saltando {name}. Peso o tamaño de entrada no definido.")
@@ -180,7 +180,7 @@ def classify_ensemble(face_image, ensemble_models):
         
     return label, f"{confidence:.2%}"
 def find_last_conv_layer(model):
-    # Función original para el respaldo de Grad-CAM
+    # Función original para el Grad-CAM
     for layer in reversed(model.layers):
         shape = layer.output_shape if hasattr(layer, "output_shape") else None
         if shape is None: continue
@@ -188,7 +188,7 @@ def find_last_conv_layer(model):
     return None
 
 def extract_image_metadata(pil_img):
-    # (Función original, no modificada)
+    
     meta_text = "Metadatos encontrados:\n"
     try:
         exif_data = pil_img._getexif() if hasattr(pil_img, "_getexif") else None
@@ -262,7 +262,7 @@ def classify_ensemble(face_image, ensemble_models):
     # 1. Acumular Predicciones de Probabilidad (0=Real, 1=Fake)
     for name, model in ensemble_models.items():
         try:
-            # 🔑 CAMBIO CLAVE: Redimensionar el rostro a la forma esperada por el modelo
+            
             target_size = MODEL_INPUT_SIZES.get(name)
             
             if target_size is None:
@@ -327,14 +327,14 @@ def generate_grad_cam(face_image, model):
         x = (face.copy() / 255.0)
         x_exp = np.expand_dims(x, axis=0)
         
-        # 2. Recrear el modelo con las dos salidas
+        
         grad_model = tf.keras.models.Model(
             inputs=model.inputs,
             outputs=[model.get_layer(last_conv_layer_name).output, model.output]
         )
         
         with tf.GradientTape() as tape:
-            # 3. Llamada al modelo. 'outputs' es una tupla de 2 elementos.
+            # 3. Llamada al modelo, una tupla de 2 elementos.
             outputs = grad_model(x_exp)
             
             # FORZAR A TENSOR antes de indexar.
@@ -356,7 +356,7 @@ def generate_grad_cam(face_image, model):
         # --- Visualización (OpenCV) ---
         heatmap = heatmap.numpy()
         
-        # 🔑 BLINDAJE CONTRA EL ERROR DE CV2.RESIZE (Assert Failed)
+        #  BLINDAJE CONTRA EL ERROR DE CV2.RESIZE 
         h_face, w_face = face_image.shape[0], face_image.shape[1]
         
         if h_face <= 0 or w_face <= 0:
@@ -379,7 +379,7 @@ def generate_grad_cam(face_image, model):
         print(f"Error en el cálculo y visualización de Grad-CAM para XCEPTION: {e}")
         return None
 
-# --- FUNCIÓN PRINCIPAL DE IMAGEN (MODIFICADO: Usa Ensamble)---
+# --- FUNCIÓN PRINCIPAL DE IMAGEN ---
 image_model_flag = True
 def analyze_image(pil_img):
     if not image_model_flag:
@@ -394,14 +394,14 @@ def analyze_image(pil_img):
     if face_arr is None:
         label, confidence, heatmap_img = "No se detectó rostro", "N/A", None
     else:
-        # 1. Clasificación por Ensamble (Usa face_arr, que se redimensiona internamente en classify_ensemble)
+        # 1. Clasificación por Ensamble 
         label, confidence = classify_ensemble(face_arr, ensemble_models)
         
-        # 2. XAI: Solo se genera Grad-CAM para XCEPTION (DEBE USAR EL TAMAÑO CORRECTO)
+        # 2. XAI: Solo se genera Grad-CAM para XCEPTION 
         xception_model = ensemble_models.get("XCEPTION")
         
         if xception_model:
-            # 🔑 CORRECCIÓN CLAVE: Redimensionar el input a (299, 299) ANTES de Grad-CAM
+            
             # Usamos el tamaño definido en la configuración para XCEPTION
             XCEPTION_SIZE = (299, 299)
             face_for_xception = resize_face_for_model(face_arr, XCEPTION_SIZE)
@@ -411,7 +411,7 @@ def analyze_image(pil_img):
         else:
             heatmap_img = None
 
-    # ... (código de detección de rasgos con Haar Cascades, no modificado) ...
+    # .Código de detección de rasgos con Haar Cascades
     img_box = original_img.copy()
     img_box_bgr = cv2.cvtColor(img_box, cv2.COLOR_RGB2BGR)
 
@@ -447,7 +447,7 @@ def analyze_image(pil_img):
     )
 
 # ===========================================================================
-# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO (MODIFICADO: Usa Ensamble)
+# SECCIÓN 1.5: LÓGICA DE ANÁLISIS DE VIDEO 
 # ===========================================================================
 
 def analyze_video(video_path):
@@ -490,7 +490,7 @@ def analyze_video(video_path):
                 face_arr, _, _, _ = preprocess_face(frame_rgb)
 
                 if face_arr is not None:
-                    # 🔑 CAMBIO CLAVE: Usamos la función del ensamble para la clasificación por frame
+                    # Usamos la función del ensamble para la clasificación por frame
                     label, confidence_str = classify_ensemble(face_arr, ensemble_models) 
 
                     # Convertir "95.00%" a un número 0.95
@@ -542,11 +542,11 @@ def analyze_video(video_path):
 
 
 # ===========================================================================
-# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO (Original, no modificado)
+# SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO 
 # ===========================================================================
 
 def preprocess_audio(audio_path, target_height=AUDIO_HEIGHT, target_width=AUDIO_WIDTH):
-    # (Función original, no modificada)
+    
     try:
         y, sr = librosa.load(audio_path, sr=None)
         mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=target_height)
@@ -570,7 +570,7 @@ def preprocess_audio(audio_path, target_height=AUDIO_HEIGHT, target_width=AUDIO_
         return None, None
     
 def analyze_audio(audio_path):
-    # (Función original, no modificada)
+    
     if audio_model is None:
         raise gr.Error(f"El modelo de audio '{AUDIO_MODEL_PATH}' no está cargado. Esta es una demostración.")
     spectrogram_arr_gray, spectrogram_pil = preprocess_audio(audio_path)
@@ -591,7 +591,7 @@ def analyze_audio(audio_path):
 
 
 # ===========================================================================
-# SECCIÓN 3: INTERFAZ DE GRADIO (Original, no modificado)
+# SECCIÓN 3: INTERFAZ DE GRADIO 
 # ===========================================================================
 
 with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
