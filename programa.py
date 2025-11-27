@@ -17,8 +17,6 @@ tf.get_logger().setLevel('ERROR')
 # CONFIGURACIÓN 
 # ---------------------------------------------------------------------------
 
-
-
 ENSEMBLE_MODEL_PATHS = {
    
     "XCEPTION": "xception_deepfake_video.h5",
@@ -121,6 +119,14 @@ def resize_face_for_model(face_arr, target_size):
     return face_arr
 
 def classify_ensemble(face_image, ensemble_models):
+    """
+    Clasifica un rostro usando la técnica de Ensamble por Votación Ponderada.
+
+    Cada modelo (ej. XCEPTION, CNN_DEEPFAKE) predice la probabilidad 
+    de ser 'Fake' (0 a 1). La predicción final es la suma ponderada 
+    de estas probabilidades, dividida por la suma de los pesos cargados.
+    Esto mejora la robustez y generalización .
+    """
     if not ensemble_models: return None, None
     if face_image is None: return None, None
     
@@ -156,7 +162,7 @@ def classify_ensemble(face_image, ensemble_models):
             pred = model.predict(x, verbose=0)
             prob_fake = float(np.squeeze(pred))
             
-            # CAMBIO CLAVE: Sumar la predicción multiplicada por su peso
+            # Sumar la predicción multiplicada por su peso
             weighted_sum_pred += prob_fake * weight
             total_weight += weight
             
@@ -174,15 +180,15 @@ def classify_ensemble(face_image, ensemble_models):
     
     threshold = 0.5
     if prob_fake > threshold:
-        label = "Potencialmente Falso (Fake) [Ponderado]"
+        label = "Potencialmente 🔴 Falso (Fake) [Ponderado]"
         confidence = prob_fake
     else:
-        label = "Potencialmente Real [Ponderado]"
+        label = "Potencialmente 🟢 Real [Ponderado]"
         confidence = 1.0 - prob_fake
         
     return label, f"{confidence:.2%}"
 def find_last_conv_layer(model):
-    # Función original para el Grad-CAM
+    # Grad-CAM
     for layer in reversed(model.layers):
         shape = layer.output_shape if hasattr(layer, "output_shape") else None
         if shape is None: continue
@@ -211,7 +217,7 @@ def extract_image_metadata(pil_img):
     return meta_text.strip()
 
 def analyze_metadata_for_ai(metadata_text):
-    # (Función original, no modificada)
+    
     clues = []
     metadata_lower = metadata_text.lower()
     ai_keywords = [
@@ -274,7 +280,7 @@ def classify_ensemble(face_image, ensemble_models):
             else:
                 face_input = resize_face_for_model(face_image, target_size)
             
-            # Preparación para la predicción (normalización y batch dimension)
+            # Preparación para la predicción (
             x = (face_input.astype(np.float32).copy() / 255.0)
             x = np.expand_dims(x, axis=0)
 
@@ -296,10 +302,10 @@ def classify_ensemble(face_image, ensemble_models):
 
     threshold = 0.5
     if prob_fake > threshold:
-        label = "Potencialmente Falso (Fake) [Ensamble]"
+        label = "Potencialmente 🔴 Falso (Fake) [Ensamble]"
         confidence = prob_fake
     else:
-        label = "Potencialmente Real [Ensamble]"
+        label = "Potencialmente 🟢 Real [Ensamble]"
         confidence = 1.0 - prob_fake
 
     return label, f"{confidence:.2%}"
@@ -440,6 +446,7 @@ def analyze_image(pil_img):
     img_box = cv2.cvtColor(img_box_bgr, cv2.COLOR_BGR2RGB)
 
     # --- Devolver 5 valores ---
+
     return (
         Image.fromarray(img_box),
         f"{label} (Confianza: {confidence})",
@@ -527,21 +534,20 @@ def analyze_video(video_path):
             f"Duración Total: {total_seconds:.1f} segundos\n"
             f"Cuadros Analizados: {frames_analyzed}\n"
             f"Ratio de Cuadros Falsos: {fake_ratio:.2%}\n\n"
-            f"VEREDICTO FINAL: {'FALSO' if fake_ratio > 0.5 else 'REAL'} \n"
+            f"VEREDICTO FINAL: {' 🔴 FALSO' if fake_ratio > 0.5 else '🟢 REAL'} \n"
             f"(Basado en la mayoría de cuadros del ensamble)\n\n"
             f"--- Estadísticas Frame-a-Frame ---\n"
             f"Puntuación Máxima de Falsedad (Frame): {max_fake:.2%}\n"
             f"Cuadros con Rostros 'Fake': {len(fake_scores)}\n"
             f"Cuadros con Rostros 'Real': {len(real_scores)}\n"
         )
-
+         
         print("Análisis de video completado.")
         return report
-
+    
     except Exception as e:
         print(f"Error en analyze_video: {e}")
         return f"Error durante el análisis: {e}"
-
 
 # ===========================================================================
 # SECCIÓN 2: LÓGICA DE ANÁLISIS DE AUDIO 
@@ -587,10 +593,12 @@ def analyze_audio(audio_path):
     threshold = 0.5
     if prob_fake > threshold:
         label = f"Voz Potencialmente Falsa (Fake)\n(Confianza: {prob_fake:.2%})"
+        final_label = f"🔴 FALSO (Voz) - Confianza: {prob_fake:.2%}"
     else:
         label = f"Voz Potencialmente Real\n(Confianza: {1.0 - prob_fake:.2%})"
-    return gr.Label(label, value=label), spectrogram_pil
+        final_label = f"🟢 REAL (Voz) - Confianza: {1.0 - prob_fake:.2%}"
 
+    return gr.Label(final_label, value=final_label), spectrogram_pil
 
 # ===========================================================================
 # SECCIÓN 3: INTERFAZ DE GRADIO 
@@ -599,11 +607,11 @@ def analyze_audio(audio_path):
 with gr.Blocks(title="Detector Multimodal de Deepfakes") as demo:
     gr.Markdown(
         """
-        # Detector Multimodal de Deepfakes con XAI (Ensamble)
+        # Detector Multimodal de Deepfakes con XAI
         Proyecto de Software (CIB02-N). Sistema de Ensamble y XAI para un análisis forense más robusto.
         """
     )
-    # ... (El resto de la interfaz Gradio, tabs y clicks, permanece igual) ...
+   
     with gr.Tabs():
         with gr.TabItem("Análisis de Imagen "):
             gr.Markdown("Sube una **imagen** para la detección de deepfake facial, XAI y análisis de rasgos (Clasificación por Ensamble).")
