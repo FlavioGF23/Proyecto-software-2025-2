@@ -57,3 +57,11 @@ deepfake_audio_model.h5
 
 ### 4. Ejecutar la Aplicación
 Una vez iniciado, la interfaz estará disponible en tu navegador en: http://127.0.0.1:7860
+
+👥 Autor y Créditos
+
+Universidad Nacional de Ingeniería (UNI) Facultad de Ingeniería Eléctrica y Electrónica - 2025
+
+Flavio Cesar Garcia Ferrer - Desarrollo, Implementación, Arquitectura, Investigación y Documentación
+
+Este proyecto fue desarrollado como parte del curso de Ingeniería de Software (CIB02) a cargo del Ingenieria Yury Oscar Tello Canchapoma - .
