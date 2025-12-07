@@ -39,3 +39,24 @@ El sistema sigue una arquitectura por capas, separando la lógica de presentaci�
 ```bash
 git clone [https://github.com/FlavioGF23/Proyecto-software-2025-2.git](https://github.com/FlavioGF23/Proyecto-software-2025-2.git)
 cd Proyecto-software-2025-2
+
+###2. Instalar dependencias
+Instala las librerías necesarias listadas en requirements.txt:
+
+(Si no tienes el archivo, las principales son: tensorflow, opencv-python, gradio, numpy, pillow, librosa, matplotlib).
+
+3. Descargar Modelos Entrenados (Obligatorio)
+Debido al tamaño de los archivos de pesos, estos se alojan externamente. 📥
+
+Descarga y coloca los siguientes archivos .h5 en la raíz del proyecto (misma carpeta que programa.py):
+
+xception_deepfake_video.h5
+
+cnn_model.h5
+
+deepfake_audio_model.h5
+
+⚠️ Nota: Si no descargas estos modelos, el sistema lanzará errores de carga al iniciar.
+
+4. Ejecutar la Aplicación
+Una vez iniciado, la interfaz estará disponible en tu navegador en: http://127.0.0.1:7860
