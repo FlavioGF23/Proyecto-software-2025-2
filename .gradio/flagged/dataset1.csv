@@ -1,2 +1,0 @@
-Sube una imagen,Rostro Detectado,Resultado del modelo,Mapa de Calor (Grad-CAM),timestamp
-.gradio\flagged\Sube una imagen\a3d4d0140f0bf307de53\foto.jpeg,.gradio\flagged\Rostro Detectado\de7126026052f71d0369\image.webp,Potencialmente Real (Confianza: 80.96%),.gradio\flagged\Mapa de Calor Grad-CAM\ef00b5408adb4c4de76b\image.webp,2025-10-21 16:55:40.376342
