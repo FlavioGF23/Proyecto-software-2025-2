@@ -29,7 +29,7 @@ El sistema sigue una arquitectura por capas, separando la lógica de presentaci�
 
 ![Diagrama de Arquitectura](./assets/architecture.png)
 
-## 🚀 Instalación y Puesta en Marcha
+## 🚀 Instalación 
 
 ### Prerrequisitos
 * Python 3.8 o superior
@@ -58,9 +58,9 @@ deepfake_audio_model.h5
 ### 4. Ejecutar la Aplicación
 Una vez iniciado, la interfaz estará disponible en tu navegador en: http://127.0.0.1:7860
 
-👥 Autor y Créditos
+##👥 Autor y Créditos
 
-Universidad Nacional de Ingeniería (UNI) Facultad de Ingeniería Eléctrica y Electrónica - 2025
+###Universidad Nacional de Ingeniería (UNI) Facultad de Ingeniería Eléctrica y Electrónica - 2025
 
 Flavio Cesar Garcia Ferrer - Desarrollo, Implementación, Arquitectura, Investigación y Documentación
 
