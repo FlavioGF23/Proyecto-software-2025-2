@@ -1,0 +1,7 @@
+tensorflow
+opencv-python
+numpy
+pillow
+gradio
+librosa
+matplotlib
