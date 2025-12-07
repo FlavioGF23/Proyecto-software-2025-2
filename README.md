@@ -28,7 +28,6 @@ El sistema utiliza un **Ensamble Ponderado** de arquitecturas robustas (Xception
 El sistema sigue una arquitectura por capas, separando la lógica de presentación (Gradio), la lógica de negocio (Inferencia y XAI) y el acceso a datos.
 
 ![Diagrama de Arquitectura](./assets/architecture.png)
-*(Asegúrate de subir la imagen de la pág. 8 de tu memoria a una carpeta /assets)*
 
 ## 🚀 Instalación y Puesta en Marcha
 
